@@ -138,7 +138,7 @@ The reviewer is a gate, not a substitute for your tests. Keep the real checks in
 | `land =` | What the train does with a green batch |
 |---|---|
 | `"push"` | Pushes it to the trunk (or moves the local trunk in local-only mode). |
-| `"pr"` | Pushes it to a `plowline/train-<time>` branch and opens one pull request with `gh`. The lanes wait as `proposed`, and the next train waits for that PR. When it merges, by any method, the lanes are marked landed. If it is closed unmerged, they bounce. Use it when the trunk is protected or needs a human approval. |
+| `"pr"` | Pushes it to a `plowline/train-<time>-<commit>` branch and opens one pull request with `gh`. The lanes wait as `proposed`, and the next train waits for that PR. When it merges, by any method, the lanes are marked landed. If it is closed unmerged, they bounce. Use it when the trunk is protected or needs a human approval. |
 
 `on_land` runs in the repo root after each landing, once per train. It gets
 `PLOWLINE_TRUNK`, `PLOWLINE_COMMIT`, `PLOWLINE_LANES`,
@@ -189,4 +189,4 @@ Apache-2.0. See [LICENSE](LICENSE).
 
 ---
 
-<sub><img src="docs/ox-mark.svg" height="14" alt=""> Built by <a href="https://oxgate.ai">Oxgate, Inc.</a> We run our own agents this way.</sub>
+<sub><img src="docs/ox-mark.svg" height="14" alt=""> Built by <a href="https://oxgate.ai">Oxgate, Inc.</a></sub>

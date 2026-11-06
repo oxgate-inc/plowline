@@ -224,7 +224,8 @@ class LandModesTest(unittest.TestCase):
         self.assertEqual(self.hook_log.read_text().splitlines(), [f"one|{merged}|https://example.test/pr/1"])
 
         self.lane("two")
-        self.pl("train")
+        self.pl("train")  # same second as the last train: its branch name must still be new
+        self.assertEqual(self.state("two"), "proposed")
         pr_state.write_text(json.dumps({"state": "CLOSED", "mergeCommit": None}))
         self.pl("train")
         self.assertEqual(self.state("two"), "bounced")

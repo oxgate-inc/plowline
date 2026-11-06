@@ -627,7 +627,7 @@ def cmd_train(y: Yard, a) -> int:
 
 def open_train_pr(y: Yard, merged: list[tuple[Lane, str]], head: str) -> None:
     """PR mode: push the gated train to its own branch and open one pull request for it."""
-    branch = f"plowline/train-{time.strftime('%Y%m%d-%H%M%S')}"
+    branch = f"plowline/train-{time.strftime('%Y%m%d-%H%M%S')}-{head[:7]}"
     p = subprocess.run(["git", "push", "--quiet", y.cfg["remote"], f"{head}:refs/heads/{branch}"],
                        cwd=y.root, capture_output=True, text=True)
     if p.returncode != 0:
