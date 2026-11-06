@@ -23,7 +23,7 @@ pipx install git+https://github.com/oxgate-inc/plowline
 ```
 
 If `pipx` is missing, use `python -m pip install git+https://github.com/oxgate-inc/plowline`.
-Confirm with `yard --help`.
+Confirm with `pl --help`.
 
 ## 3. Find the gate
 
@@ -36,7 +36,7 @@ confirm it passes. If it fails before any lane exists, stop and tell the user.
 ## 4. Run setup unattended
 
 ```bash
-yard setup --yes --commit --gate "<the gate command>"
+pl setup --yes --commit --gate "<the gate command>"
 ```
 
 It writes `plowline.toml`, checks the gate passes, adds the lane rules to
@@ -60,12 +60,14 @@ git push origin HEAD:main     # use the trunk name from plowline.toml
 ## 6. Tell the user how to run lanes
 
 ```bash
-yard new <lane> --paths <dirs or files> --brief briefs/<lane>.md
-# start one agent per lane, in the worktree that `yard new` printed
-yard done <lane>     # when the agent has committed
-yard train           # lands every candidate, one push
-yard status
+pl new <lane> --paths <dirs or files> --brief briefs/<lane>.md --open
+# --open starts the agent in a new terminal, already in its lane
+pl watch           # control tower: status, and a train whenever a lane is done
 ```
 
-A person can run `yard setup` with no flags for the same steps as an
+Each lane's agent runs `pl done <lane>` itself when its work is committed.
+If the user works alone with several terminals, point them to
+https://github.com/oxgate-inc/plowline/blob/main/docs/SOLO.md.
+
+A person can run `pl setup` with no flags for the same steps as an
 interactive wizard.

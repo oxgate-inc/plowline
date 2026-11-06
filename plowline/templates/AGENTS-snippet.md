@@ -11,7 +11,8 @@ This repository runs several agents at once. Each agent works in its own lane.
 - Never rebase. To pick up the trunk, merge it: `git merge origin/main`.
 - Run the repository's tests before you finish. Leave the worktree clean
   (everything committed).
-- When you are done, report what changed and how you tested it. The person or
-  agent running the lanes will run `yard done <lane>`.
-- If your lane was bounced, `yard show <lane>` prints why. Merge the trunk,
-  fix the cause, re-test and commit.
+- When your work is committed and the tests pass, run `pl done <lane>`. It sends
+  your lane to review. On NO-GO, fix the findings, commit, and run it again.
+  Then report what changed and how you tested it.
+- If your lane was bounced, `pl show <lane>` prints why. Merge the trunk,
+  fix the cause, re-test, commit, and run `pl done <lane>` again.

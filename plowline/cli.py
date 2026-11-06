@@ -14,6 +14,7 @@ import fnmatch
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -33,10 +34,14 @@ DEFAULTS = {
     "regenerate": "",
     "worktrees": "../{repo}-lanes",
     "branch_prefix": "lane/",
+    "agent": "claude",
 }
 LANE_NAME = re.compile(r"^[a-z0-9][a-z0-9._-]{0,62}$")
 DIFF_LIMIT = 200_000
 LOCK_STALE_SECONDS = 2 * 60 * 60
+LANE_PROMPT = ("You are working in the Plowline lane {name}. Run pl show {name} to read your brief, "
+               "and follow the lane rules in CLAUDE.md or AGENTS.md. When your work is committed and the tests "
+               "pass, run pl done {name}. If it answers NO-GO, fix the findings and run it again.")
 
 REVIEW_PROMPT = """You are reviewing one lane of work before it joins a merge train.
 Another agent wrote it in its own git worktree. Read the brief and the diff.
@@ -176,6 +181,20 @@ class Yard:
             return f"{self.cfg['remote']}/{trunk}"
         return trunk
 
+    def land_local(self, head: str, tip: str) -> None:
+        """No remote: move the local trunk to the train's head, updating its checkout if it has one."""
+        trunk = self.cfg["trunk"]
+        for block in git("worktree", "list", "--porcelain", cwd=self.root).split("\n\n"):
+            lines = block.splitlines()
+            if f"branch refs/heads/{trunk}" in lines:
+                path = Path(lines[0].removeprefix("worktree "))
+                if git("status", "--porcelain", "--untracked-files=no", cwd=path):
+                    raise YardError(f"{path} has uncommitted changes on {trunk}; commit or stash them, "
+                                    "then run the train again (candidates are unchanged)")
+                git("merge", "--ff-only", "--quiet", head, cwd=path)
+                return
+        git("update-ref", f"refs/heads/{trunk}", head, tip, cwd=self.root)
+
     def worktree_dir(self, name: str) -> Path:
         base = Path(self.cfg["worktrees"].format(repo=self.root.name))
         if not base.is_absolute():
@@ -255,14 +274,12 @@ def cmd_setup(y: Yard, a) -> int:
     if version < (2, 31):
         raise YardError(f"git 2.31 or newer is needed (found {'.'.join(map(str, version))})")
     remotes = git("remote", cwd=y.root).split()
-    if not remotes:
-        raise YardError("this repository has no remote; the train pushes to one (add it with `git remote add origin <url>`)")
 
     cfg_file = y.root / CONFIG_NAME
     if cfg_file.exists() and not a.force:
         say(f"keeping the existing {CONFIG_NAME} (use --force to rewrite it)")
     else:
-        remote = a.remote or ("origin" if "origin" in remotes else remotes[0])
+        remote = a.remote if a.remote is not None else ("origin" if "origin" in remotes else (remotes or [""])[0])
         head = git("symbolic-ref", "--short", "-q", f"refs/remotes/{remote}/HEAD", cwd=y.root, check=False)
         trunk = a.trunk or (head.split("/", 1)[1] if "/" in head else git("branch", "--show-current", cwd=y.root) or "main")
         gate = a.gate if a.gate is not None else next(
@@ -271,10 +288,12 @@ def cmd_setup(y: Yard, a) -> int:
             (spec for spec, argv in BUILTIN_REVIEWERS.items() if shutil.which(argv[0])), "")
         if interactive:
             say("Plowline setup. Press Enter to keep a default, '-' to leave a value empty.\n")
-        remote = ask("Remote the train pushes to", remote, interactive)
+        remote = ask("Remote the train pushes to ('-' for local-only: the train updates your local trunk)",
+                     remote, interactive)
         trunk = ask("Trunk branch", trunk, interactive)
         gate = ask("Gate: the command that must pass before a push", gate, interactive)
         review = ask("Reviewer (builtin:claude, builtin:codex, a command, or '-' for none)", review, interactive)
+        agent = ask("Command that starts an agent in a lane (used by pl open)", a.agent or "claude", interactive)
         regenerate = ask("Command that rebuilds generated files ('-' for none)", a.regenerate or "", interactive) \
             if interactive or a.regenerate else ""
         if not gate:
@@ -286,9 +305,10 @@ def cmd_setup(y: Yard, a) -> int:
             f"gate = {json.dumps(gate)}  # must pass on the merged train before anything is pushed\n"
             f"review = {json.dumps(review)}  # builtin:claude, builtin:codex, any command (exit 0 = GO), or \"\"\n"
             f"regenerate = {json.dumps(regenerate)}  # optional: rebuilds generated files on the merged tree\n"
+            f"agent = {json.dumps(agent)}  # what `pl open` starts in a lane's terminal\n"
             'worktrees = "../{repo}-lanes"\n',
             encoding="utf-8")
-        y.cfg.update(trunk=trunk, remote=remote, gate=gate, review=review, regenerate=regenerate)
+        y.cfg.update(trunk=trunk, remote=remote, gate=gate, review=review, regenerate=regenerate, agent=agent)
         say(f"wrote {CONFIG_NAME}")
 
     if not a.skip_gate_check:
@@ -320,14 +340,15 @@ def cmd_setup(y: Yard, a) -> int:
         if git("diff", "--cached", "--name-only", cwd=y.root):
             git("commit", "--quiet", "-m", "Add Plowline lane setup", cwd=y.root)
             say("committed: Add Plowline lane setup")
-    if confirm(f"Push to {y.cfg['remote']}/{y.cfg['trunk']} now?", interactive, a.push):
+    if not y.has_remote():
+        say(f"local-only mode: lanes branch from your local {y.cfg['trunk']}, and the train updates it")
+    elif confirm(f"Push to {y.cfg['remote']}/{y.cfg['trunk']} now?", interactive, a.push):
         git("push", "--quiet", y.cfg["remote"], f"HEAD:refs/heads/{y.cfg['trunk']}", cwd=y.root)
         say(f"pushed to {y.cfg['remote']}/{y.cfg['trunk']}")
     else:
-        say(f"lanes branch from {y.cfg['remote']}/{y.cfg['trunk']}: push this commit before `yard new`")
-    say("\nnext:\n  yard new <lane> --paths <dirs or files> --brief briefs/<lane>.md\n"
-        "  start one agent per lane in the worktree it prints\n"
-        "  yard done <lane>\n  yard train")
+        say(f"lanes branch from {y.cfg['remote']}/{y.cfg['trunk']}: push the setup before `pl new`")
+    say("\nnext:\n  pl new <lane> --paths <dirs or files> --brief briefs/<lane>.md --open\n"
+        "  pl watch     # in this terminal: status, and a train whenever a lane is done")
     return 0
 
 
@@ -338,7 +359,7 @@ def cmd_new(y: Yard, a) -> int:
     branch = y.cfg["branch_prefix"] + name
     wt = y.worktree_dir(name)
     if y.lane_file(name).exists():
-        raise YardError(f"lane {name!r} already exists; use `yard resume {name}` or pick a new name")
+        raise YardError(f"lane {name!r} already exists; use `pl resume {name}` or pick a new name")
     if git_ok("show-ref", "--verify", "--quiet", f"refs/heads/{branch}", cwd=y.root):
         raise YardError(f"branch {branch} already exists")
     if y.has_remote() and git_ok("ls-remote", "--exit-code", "--heads", y.cfg["remote"], branch, cwd=y.root):
@@ -354,7 +375,49 @@ def cmd_new(y: Yard, a) -> int:
     print(f"lane {name}: {wt} on {branch} from {base_ref} {base[:9]}")
     for other, p, q in y.overlaps(lane):
         print(f"  overlap: {p} touches {q} in lane {other} (allowed; the train settles it)")
+    return open_lane(y, lane, print_only=False) if a.open else 0
+
+
+def open_command(y: Yard, lane: Lane) -> tuple[list[str] | None, str]:
+    """The argv that opens a new terminal running the agent in this lane, and the same as a manual command."""
+    wt, title = lane.worktree, f"lane {lane.name}"
+    agent = shlex.split(str(y.cfg["agent"]))
+    prompt = LANE_PROMPT.format(name=lane.name)
+    manual = f'cd "{wt}" && {y.cfg["agent"]} "{prompt}"'
+    if sys.platform == "win32":
+        if shutil.which("wt"):
+            return ["wt", "-w", "0", "new-tab", "--title", title, "-d", wt, "cmd", "/k", *agent, prompt], manual
+        return ["cmd", "/c", "start", title, "/D", wt, "cmd", "/k", *agent, prompt], manual
+    script = f"cd {shlex.quote(wt)} && {shlex.join(agent)} {shlex.quote(prompt)}"
+    if sys.platform == "darwin":
+        quoted = script.replace("\\", "\\\\").replace('"', '\\"')
+        return ["osascript", "-e", f'tell application "Terminal" to do script "{quoted}"',
+                "-e", 'tell application "Terminal" to activate'], manual
+    if os.environ.get("TMUX"):
+        return ["tmux", "new-window", "-n", lane.name, "-c", wt, f"{shlex.join(agent)} {shlex.quote(prompt)}"], manual
+    for term in ("gnome-terminal", "konsole", "x-terminal-emulator"):
+        if shutil.which(term):
+            inner = f'{script}; exec "${{SHELL:-sh}}"'
+            if term == "gnome-terminal":
+                return [term, f"--working-directory={wt}", "--", "sh", "-c", inner], manual
+            return [term, "-e", "sh", "-c", inner], manual
+    return None, manual
+
+
+def open_lane(y: Yard, lane: Lane, print_only: bool) -> int:
+    argv, manual = open_command(y, lane)
+    if print_only or argv is None:
+        if argv is None:
+            print("no supported terminal found; run this in a new terminal:")
+        print(manual)
+        return 0
+    subprocess.Popen(argv, cwd=lane.worktree)
+    print(f"opened lane {lane.name} in a new terminal ({y.cfg['agent']})")
     return 0
+
+
+def cmd_open(y: Yard, a) -> int:
+    return open_lane(y, y.load(a.name), a.print)
 
 
 def cmd_status(y: Yard, a) -> int:
@@ -421,8 +484,6 @@ def bounce(y: Yard, lane: Lane, note: str) -> None:
 def cmd_train(y: Yard, a) -> int:
     if not str(y.cfg["gate"]).strip():
         raise YardError("set `gate` in plowline.toml first")
-    if not y.has_remote():
-        raise YardError(f"the train pushes to remote {y.cfg['remote']!r}, which this repo does not have")
     with y.lock():
         cands = sorted((l for l in y.lanes() if l.state == "candidate"), key=lambda l: l.queued_at)
         if not cands:
@@ -447,7 +508,7 @@ def cmd_train(y: Yard, a) -> int:
                         f" + lanes {', '.join(l.name for l, _ in merged)} from this train" if merged else "")
                     bounce(y, lane, f"MERGE_CONFLICT with {against}: "
                                     f"{', '.join(paths.split()) or 'see git output'}\n"
-                                    f"Merge {base_ref} into {lane.branch}, resolve, re-test, then `yard done {lane.name}`.")
+                                    f"Merge {base_ref} into {lane.branch}, resolve, re-test, then `pl done {lane.name}`.")
                     bounced += 1
                     continue
                 merged.append((lane, git("rev-parse", "HEAD", cwd=scratch)))
@@ -467,7 +528,7 @@ def cmd_train(y: Yard, a) -> int:
                 lane, _ = merged.pop()
                 git("reset", "--quiet", "--hard", merged[-1][1] if merged else tip, cwd=scratch)
                 bounce(y, lane, f"GATE_FAIL on the train with {names}; {lane.name} was added last.\n"
-                                f"{tail(out)}\nMerge {base_ref} into {lane.branch}, fix, re-test, then `yard done {lane.name}`.")
+                                f"{tail(out)}\nMerge {base_ref} into {lane.branch}, fix, re-test, then `pl done {lane.name}`.")
                 bounced += 1
             if not merged:
                 print("nothing landed")
@@ -476,11 +537,14 @@ def cmd_train(y: Yard, a) -> int:
             if a.dry_run:
                 print(f"dry run: would push {head[:9]} to {base_ref}")
                 return 0
-            p = subprocess.run(["git", "push", "--quiet", y.cfg["remote"], f"HEAD:refs/heads/{y.cfg['trunk']}"],
-                               cwd=scratch, capture_output=True, text=True)
-            if p.returncode != 0:
-                raise YardError(f"push refused (did {base_ref} move?); candidates are unchanged, run the train again\n"
-                                f"{p.stderr.strip()}")
+            if y.has_remote():
+                p = subprocess.run(["git", "push", "--quiet", y.cfg["remote"], f"HEAD:refs/heads/{y.cfg['trunk']}"],
+                                   cwd=scratch, capture_output=True, text=True)
+                if p.returncode != 0:
+                    raise YardError(f"push refused (did {base_ref} move?); candidates are unchanged, run the train again\n"
+                                    f"{p.stderr.strip()}")
+            else:
+                y.land_local(head, tip)
             for lane, _ in merged:
                 lane.state, lane.note = "landed", f"landed in {head}"
                 y.save(lane)
@@ -500,7 +564,7 @@ def cmd_resume(y: Yard, a) -> int:
     print(f"lane {lane.name} is active again in {lane.worktree}\n")
     print(lane.note.strip())
     print(f"\nnext:\n  git -C \"{lane.worktree}\" merge {trunk}   # merge, never rebase\n"
-          f"  fix, test, commit\n  yard done {lane.name}")
+          f"  fix, test, commit\n  pl done {lane.name}")
     return 0
 
 
@@ -522,8 +586,39 @@ def cmd_clean(y: Yard, a) -> int:
     return 0
 
 
+def cmd_watch(y: Yard, a) -> int:
+    """A control tower for one terminal: lane status, and a train whenever a lane becomes a candidate."""
+    import io
+    from contextlib import redirect_stdout
+    events: list[str] = []
+    try:
+        while True:
+            if any(l.state == "candidate" for l in y.lanes()) and not a.no_train:
+                buf = io.StringIO()
+                with redirect_stdout(buf):
+                    try:
+                        cmd_train(y, argparse.Namespace(dry_run=False))
+                    except YardError as e:
+                        print(f"train stopped: {e}")
+                stamp = time.strftime("%H:%M:%S")
+                events += [f"{stamp}  {line}" for line in buf.getvalue().splitlines() if line.strip()]
+                events = events[-12:]
+            if sys.stdout.isatty() and not a.once:
+                print("\033[2J\033[H", end="")
+            print(f"plowline watch · {time.strftime('%H:%M:%S')} · every {a.interval}s · Ctrl-C to stop\n")
+            cmd_status(y, a)
+            if events:
+                print("\nrecent trains:")
+                print("\n".join(events))
+            if a.once:
+                return 0
+            time.sleep(a.interval)
+    except KeyboardInterrupt:
+        return 0
+
+
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(prog="yard", description="Run many coding agents on one repo.")
+    ap = argparse.ArgumentParser(prog="pl", description="Plowline: run many coding agents on one repo.")
     sub = ap.add_subparsers(dest="cmd", required=True)
     for cmd in ("setup", "init"):
         p = sub.add_parser(cmd, help="set up this repo (wizard; --yes for agents)" if cmd == "setup" else "alias for setup")
@@ -532,7 +627,8 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("--review", help="builtin:claude, builtin:codex, a command, or '' for none")
         p.add_argument("--regenerate", help="command that rebuilds generated files")
         p.add_argument("--trunk")
-        p.add_argument("--remote")
+        p.add_argument("--remote", help="remote the train pushes to; '' for local-only")
+        p.add_argument("--agent", help="command `pl open` starts in a lane (default: claude)")
         p.add_argument("--force", action="store_true", help="rewrite an existing plowline.toml")
         p.add_argument("--skip-gate-check", action="store_true")
         p.add_argument("--no-agent-files", action="store_true", help="leave AGENTS.md, CLAUDE.md and briefs/ alone")
@@ -542,7 +638,15 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("name")
     p.add_argument("--paths", nargs="*", help="files or globs this lane expects to touch")
     p.add_argument("--brief", help="file holding the lane's brief")
+    p.add_argument("--open", action="store_true", help="also open a terminal with the agent in the lane")
+    p = sub.add_parser("open", help="open a new terminal with the agent running in a lane")
+    p.add_argument("name")
+    p.add_argument("--print", action="store_true", help="print the command instead of opening a terminal")
     sub.add_parser("status", help="list lanes, claims and overlaps")
+    p = sub.add_parser("watch", help="control tower: refresh status, run a train when a lane is done")
+    p.add_argument("--interval", type=int, default=15, help="seconds between refreshes")
+    p.add_argument("--no-train", action="store_true", help="only show status")
+    p.add_argument("--once", action="store_true", help="one refresh, then exit")
     p = sub.add_parser("show", help="print a lane's brief and latest note")
     p.add_argument("name")
     p = sub.add_parser("done", help="review a lane and make it a train candidate")
@@ -557,10 +661,10 @@ def main(argv: list[str] | None = None) -> int:
     try:
         y = Yard(Path.cwd())
         return {"setup": cmd_setup, "init": cmd_setup, "new": cmd_new, "status": cmd_status, "show": cmd_show,
-                "done": cmd_done, "train": cmd_train, "resume": cmd_resume,
-                "clean": cmd_clean}[a.cmd](y, a)
+                "done": cmd_done, "train": cmd_train, "resume": cmd_resume, "open": cmd_open,
+                "watch": cmd_watch, "clean": cmd_clean}[a.cmd](y, a)
     except YardError as e:
-        print(f"yard: {e}", file=sys.stderr)
+        print(f"plowline: {e}", file=sys.stderr)
         return 2
 
 

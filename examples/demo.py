@@ -47,9 +47,9 @@ def run(say=print) -> dict:
     sh("git", "commit", "--quiet", "-m", "init", cwd=app)
     sh("git", "push", "--quiet", "-u", "origin", "main", cwd=app)
 
-    def yard(*args: str, cwd: Path = app) -> subprocess.CompletedProcess:
+    def pl(*args: str, cwd: Path = app) -> subprocess.CompletedProcess:
         p = sh(sys.executable, "-m", "plowline", *args, cwd=cwd, check=False)
-        say(f"$ yard {' '.join(args)}\n{(p.stdout + p.stderr).rstrip()}\n")
+        say(f"$ pl {' '.join(args)}\n{(p.stdout + p.stderr).rstrip()}\n")
         if p.returncode == 2:
             raise RuntimeError(p.stderr)
         return p
@@ -58,27 +58,27 @@ def run(say=print) -> dict:
             "c": ("shared.txt", "changed by c\n"), "d": ("shared.txt", "changed by d\n"),
             "e": ("e.txt", "BROKEN\n")}
     for name, (path, _) in work.items():
-        yard("new", name, "--paths", path)
+        pl("new", name, "--paths", path)
     for name, (path, text) in work.items():
         wt = tmp / "app-lanes" / name
         (wt / path).write_text(text)
         sh("git", "add", path, cwd=wt)
         sh("git", "commit", "--quiet", "-m", f"lane {name}", cwd=wt)
-        yard("done", name)
+        pl("done", name)
 
-    yard("train")
-    yard("status")
+    pl("train")
+    pl("status")
 
     # d was bounced for a conflict: merge main into the lane, resolve, land it.
-    yard("resume", "d")
+    pl("resume", "d")
     wt = tmp / "app-lanes" / "d"
     sh("git", "merge", "--quiet", "origin/main", cwd=wt, check=False)
     (wt / "shared.txt").write_text("changed by c\nchanged by d\n")
     sh("git", "commit", "--quiet", "-am", "lane d: merge main, keep both", cwd=wt)
-    yard("done", "d")
-    yard("train")
-    yard("clean")
-    yard("status")
+    pl("done", "d")
+    pl("train")
+    pl("clean")
+    pl("status")
 
     log = sh("git", "log", "--oneline", "--first-parent", "origin/main", cwd=app).stdout
     states = {f.stem: json.loads(f.read_text())["state"]

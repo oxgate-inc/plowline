@@ -77,8 +77,8 @@ class SetupWizardTest(unittest.TestCase):
             run("git", "clone", "-q", str(tmp / "origin.git"), str(app), cwd=tmp)
             (app / "AGENTS.md").write_text("# Existing rules\n")
             os.chdir(app)
-            # remote, trunk, gate, review ('-' = none), regenerate, commit?, push?
-            answers = iter(["", "", f'"{sys.executable}" -c "pass"', "-", "-", "n", "n"])
+            # remote, trunk, gate, review ('-' = none), agent, regenerate, commit?, push?
+            answers = iter(["", "", f'"{sys.executable}" -c "pass"', "-", "", "-", "n", "n"])
             with mock.patch.object(sys.stdin, "isatty", return_value=True), \
                     mock.patch("builtins.input", lambda _: next(answers)), \
                     mock.patch.dict(os.environ, {k: v for k, v in demo.ENV.items() if k.startswith("GIT_")}):
@@ -92,6 +92,44 @@ class SetupWizardTest(unittest.TestCase):
             self.assertTrue((app / "CLAUDE.md").exists() and (app / "briefs" / "TEMPLATE.md").exists())
         finally:
             os.chdir(cwd)
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+class SoloLocalTest(unittest.TestCase):
+    """One person, no remote: setup, two lanes, open --print, watch --once lands them on the local trunk."""
+
+    def test_local_only_lanes_land_through_watch(self):
+        import subprocess
+        import tempfile
+        tmp = Path(tempfile.mkdtemp(prefix="plowline-solo-")).resolve()
+        try:
+            app = tmp / "app"
+            app.mkdir()
+            run = lambda *a, cwd=app: subprocess.run(a, cwd=cwd, env=demo.ENV, capture_output=True, text=True)
+            pl = lambda *a, cwd=app: run(sys.executable, "-m", "plowline", *a, cwd=cwd)
+            run("git", "init", "-q", "-b", "main")
+            (app / "README.md").write_text("solo")
+            run("git", "add", "-A")
+            run("git", "commit", "-qm", "init")
+            setup = pl("setup", "--yes", "--commit", "--gate", f'"{sys.executable}" -c "pass"', "--review", "")
+            self.assertEqual(setup.returncode, 0, setup.stderr)
+            self.assertIn("local-only mode", setup.stdout)
+            for name in ("one", "two"):
+                self.assertEqual(pl("new", name, "--paths", f"{name}.txt").returncode, 0)
+                wt = tmp / "app-lanes" / name
+                (wt / f"{name}.txt").write_text(name)
+                run("git", "add", "-A", cwd=wt)
+                run("git", "commit", "-qm", name, cwd=wt)
+            opened = pl("open", "one", "--print")
+            self.assertIn(str(tmp / "app-lanes" / "one"), opened.stdout)
+            self.assertIn("pl done one", opened.stdout)
+            for name in ("one", "two"):
+                self.assertEqual(pl("done", name, cwd=tmp / "app-lanes" / name).returncode, 0)
+            watched = pl("watch", "--once")
+            self.assertIn("landed 2 lane(s)", watched.stdout)
+            self.assertTrue((app / "one.txt").exists() and (app / "two.txt").exists())
+            self.assertEqual(run("git", "status", "--porcelain").stdout, "")
+        finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
 

@@ -22,33 +22,46 @@ Needs Python 3.11+ and git 2.31+. No other dependencies.
 ```bash
 pipx install git+https://github.com/oxgate-inc/plowline
 cd your-repo
-yard setup                # wizard: gate, reviewer, lane rules for your agents, commit
+pl setup                # wizard: gate, reviewer, lane rules for your agents, commit
 ```
 
-Agents run the same thing unattended: `yard setup --yes --commit --gate "npm test"`.
+The command is `pl` (or the long form, `plowline`). Agents run the same setup
+unattended: `pl setup --yes --commit --gate "npm test"`.
 
-Start lanes and point one agent at each worktree:
+Start lanes. `--open` launches a new terminal with your agent already in the lane:
 
 ```bash
-yard new login-page --paths src/auth/ --brief briefs/login.md
-yard new rate-limits --paths src/api/limits.py
-yard status
+pl new login-page --paths src/auth/ --brief briefs/login.md --open
+pl new rate-limits --paths src/api/limits.py --open
+pl watch                # this terminal becomes the control tower
 ```
 
-When an agent has committed its work:
-
-```bash
-yard done login-page      # runs the reviewer, makes the lane a candidate
-yard train                # merge candidates onto main, gate once, push once
-```
+Each agent reads its brief (`pl show <lane>`), does the work, commits, and runs
+`pl done <lane>`, which sends the lane to review. `pl watch` runs a train whenever
+a lane passes: merge onto main, gate once, push once.
 
 If a lane bounces:
 
 ```bash
-yard resume rate-limits   # prints why, and the merge-main-and-fix steps
+pl resume rate-limits   # prints why, and the merge-main-and-fix steps
 ```
 
-`yard clean` removes the worktrees and branches of lanes that landed.
+`pl clean` removes the worktrees and branches of lanes that landed.
+
+**Working alone with a few Claude terminals?** See [the solo guide](docs/SOLO.md).
+
+| Command | What it does |
+|---|---|
+| `pl setup` | Wizard: gate, reviewer, agent, lane rules. `--yes` for agents. |
+| `pl new <lane>` | Worktree + branch + claim. `--paths`, `--brief`, `--open`. |
+| `pl open <lane>` | New terminal with the agent running in that lane. `--print` to only show the command. |
+| `pl show <lane>` | The lane's brief and its latest note. |
+| `pl done <lane>` | Review the lane; on GO it waits for the next train. |
+| `pl train` | Merge candidates, gate once, push once. |
+| `pl watch` | Control tower: live status, and a train whenever a lane is done. |
+| `pl status` | Lanes, states, claims and overlaps. |
+| `pl resume <lane>` | Reopen a bounced lane with the reason and the fix steps. |
+| `pl clean` | Remove worktrees and branches of landed lanes. |
 
 <p align="center"><img src="docs/train-run.png" alt="A train run: three lanes land, a conflict and a red gate bounce" width="100%"></p>
 
@@ -75,14 +88,22 @@ remote = "origin"
 gate = "python -m pytest -q"     # must pass on the merged train before anything is pushed
 review = "builtin:claude"        # see Review below
 regenerate = ""                  # optional: rebuild generated files on the merged tree
+agent = "claude"                 # what `pl open` starts in a lane (e.g. "codex", "claude --model sonnet")
 worktrees = "../{repo}-lanes"    # where lane worktrees live
 ```
+
+Leave `remote` empty for **local-only mode**: lanes branch from your local trunk,
+and the train moves it forward (fast-forwarding your checkout if it's clean).
+
+`pl open` uses Windows Terminal (or a new console window) on Windows, Terminal on
+macOS, and a tmux window, gnome-terminal or konsole on Linux. Anywhere else it
+prints the command to paste.
 
 Lane state lives in `.git/plowline/`. It is never committed and never pushed.
 
 ### Review
 
-`yard done` runs a reviewer before a lane can join a train.
+`pl done` runs a reviewer before a lane can join a train.
 
 | `review =` | What runs |
 |---|---|
@@ -101,7 +122,8 @@ The reviewer is a gate, not a substitute for your tests. Keep the real checks in
 3. Run `regenerate` if set, then `gate`, on the merged tree.
 4. If the gate is red, drop the last-added lane (the only one the evidence
    isolates), bounce it, and run the gate again on the rest.
-5. Push once. If the trunk moved underneath, nothing is marked landed. Run the train again.
+5. Push once (or, in local-only mode, move the local trunk). If the trunk moved
+   underneath, nothing is marked landed. Run the train again.
 
 ## Why trunk-based, not gitflow?
 
@@ -114,7 +136,8 @@ production). Put human approvals on those promotions rather than on another bran
 
 - One train at a time per repository (a lock file enforces it).
 - Overlap detection is path-based. It warns, it does not reason about semantics.
-- The train pushes to a remote. For a purely local repo, add a bare remote.
+- Local-only mode refuses to land while your trunk checkout has uncommitted
+  changes to tracked files. Commit or stash them, and the next train lands.
 
 ## License
 

@@ -12,7 +12,8 @@ requires-python = ">=3.11"
 authors = [{ name = "Oxgate, Inc." }]
 
 [project.scripts]
-yard = "plowline.cli:main"
+pl = "plowline.cli:main"
+plowline = "plowline.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/oxgate-inc/plowline"
