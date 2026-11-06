@@ -189,4 +189,4 @@ Apache-2.0. See [LICENSE](LICENSE).
 
 ---
 
-<sub><img src="docs/oxgate-mark.svg" height="14" alt=""> Built by <a href="https://oxgate.ai">Oxgate</a>. We run our own agents this way.</sub>
+<sub><img src="docs/ox-mark.svg" height="14" alt=""> Built by <a href="https://oxgate.ai">Oxgate, Inc.</a> We run our own agents this way.</sub>

@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="480" height="400" viewBox="51.5 58 480 400" role="img" aria-labelledby="title desc">
+  <title id="title">Geometric ox icon</title>
+  <desc id="desc">A symmetrical evergreen ox head with sweeping horns and a saffron muzzle. Transparent background. No nose ring.</desc>
+  <g fill="#064B34">
+    <path id="left-horn" d="M155 82 C140 121 135 150 132 169 C152 184 188 194 225 201 L196 252 C142 243 94 224 81 200 C71 179 87 158 100 143 Z"/>
+    <path id="right-horn" d="M428 82 C443 121 448 150 451 169 C431 184 395 194 358 201 L387 252 C441 243 489 224 502 200 C512 179 496 158 483 143 Z"/>
+    <path id="forehead" d="M242 199 H341 L376 262 L330 296 L316 373 H267 L253 296 L207 262 Z"/>
+    <path id="left-cheek" d="M135 262 H199 L208 286 C214 301 226 305 242 309 L254 374 L234 398 L201 308 H161 Z"/>
+    <path id="right-cheek" d="M448 262 H384 L375 286 C369 301 357 305 341 309 L329 374 L349 398 L382 308 H422 Z"/>
+  </g>
+  <path id="muzzle" fill="#EA8700" d="M265 385 H318 C322 385 324 387 327 390 L340 407 C342 409 342 412 340 414 L327 430 C324 433 321 434 317 434 H266 C262 434 259 433 256 430 L243 414 C241 412 241 409 243 407 L256 390 C259 387 261 385 265 385 Z"/>
+</svg>
