@@ -13,7 +13,7 @@ authors = [{ name = "Oxgate, Inc." }]
 
 [project.scripts]
 pl = "plowline.cli:main"
-plowline = "plowline.cli:main"
+plow = "plowline.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/oxgate-inc/plowline"

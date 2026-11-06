@@ -25,7 +25,7 @@ cd your-repo
 pl setup                # wizard: gate, reviewer, lane rules for your agents, commit
 ```
 
-The command is `pl` (or the long form, `plowline`). Agents run the same setup
+The command is `pl` (or `plow`). Agents run the same setup
 unattended: `pl setup --yes --commit --gate "npm test"`.
 
 Start lanes. `--open` launches a new terminal with your agent already in the lane:
