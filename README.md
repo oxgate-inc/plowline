@@ -1,7 +1,8 @@
 <p align="center"><img src="docs/hero.png" alt="Plowline: many coding agents, one repo, one merge train" width="100%"></p>
 
-Run several coding agents (Claude Code, Codex, anything that edits files) on one
-repository without them stepping on each other.
+Run several coding agents on one repository without them stepping on each other.
+Use whichever CLI agent you like: Claude Code, Codex, Gemini CLI, Aider, or
+anything else that edits files.
 
 - **A lane per agent.** Each agent works in its own git worktree on its own
   branch, so no two agents ever share a working tree.
@@ -48,7 +49,7 @@ pl resume rate-limits   # prints why, and the merge-main-and-fix steps
 
 `pl clean` removes the worktrees and branches of lanes that landed.
 
-**Working alone with a few Claude terminals?** See [the solo guide](docs/SOLO.md).
+**Working alone with a few agent terminals?** See [the solo guide](docs/SOLO.md).
 
 | Command | What it does |
 |---|---|
@@ -74,7 +75,7 @@ pl demo
 
 ## Have an agent set it up
 
-Paste this into Claude Code, Codex or any coding agent, in your repo:
+Paste this into your coding agent, in your repo:
 
 ```text
 Set up Plowline in this repo by following
@@ -105,7 +106,7 @@ remote = "origin"
 gate = "python -m pytest -q"     # must pass on the merged train before anything is pushed
 review = "builtin:claude"        # see Review below
 regenerate = ""                  # optional: rebuild generated files on the merged tree
-agent = "claude"                 # what `pl open` starts in a lane (e.g. "codex", "claude --model sonnet")
+agent = "claude"                 # what `pl open` starts in a lane: "codex", "gemini", "aider", ...
 land = "push"                    # "push" to the trunk, or "pr": open one pull request per train
 on_land = ""                     # optional: runs after each landing (deploy, tag, notify)
 worktrees = "../{repo}-lanes"    # where lane worktrees live
@@ -129,7 +130,7 @@ Lane state lives in `.git/plowline/`. It is never committed and never pushed.
 | `""` | No review. Every finished lane is a candidate. |
 | `"builtin:claude"` | `claude -p` reads the lane's brief and diff and answers GO or NO-GO. |
 | `"builtin:codex"` | The same prompt through `codex exec`. |
-| any command | Runs in the lane's worktree. Exit 0 is GO, and its output becomes the note. It gets `PLOWLINE_LANE`, `PLOWLINE_BRANCH`, `PLOWLINE_BASE`, `PLOWLINE_HEAD` and `PLOWLINE_WORKTREE`. |
+| any command | Use this for any other agent, or a script. Runs in the lane's worktree. Exit 0 is GO, and its output becomes the note. It gets `PLOWLINE_LANE`, `PLOWLINE_BRANCH`, `PLOWLINE_BASE`, `PLOWLINE_HEAD` and `PLOWLINE_WORKTREE`. |
 
 The reviewer is a gate, not a substitute for your tests. Keep the real checks in `gate`.
 

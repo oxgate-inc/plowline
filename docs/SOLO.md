@@ -1,6 +1,6 @@
-# Solo guide: one person, several Claude terminals
+# Solo guide: one person, several agent terminals
 
-You have one repo and want three Claude Code sessions working on it at once,
+You have one repo and want three coding agents working on it at once,
 without them overwriting each other or leaving you a pile of branches to merge.
 This guide gets you there in about ten minutes.
 
@@ -16,21 +16,22 @@ This guide gets you there in about ten minutes.
 ```
 ┌──────────────────────────┐  ┌───────────────┐  ┌───────────────┐  ┌───────────────┐
 │ control tower            │  │ lane: login   │  │ lane: limits  │  │ lane: docs    │
-│ your repo · pl watch     │  │ claude        │  │ claude        │  │ claude        │
+│ your repo · pl watch     │  │ your agent    │  │ your agent    │  │ your agent    │
 │ status + automatic trains│  │ own worktree  │  │ own worktree  │  │ own worktree  │
 └──────────────────────────┘  └───────────────┘  └───────────────┘  └───────────────┘
 ```
 
 - **One control-tower terminal** in your repo, running `pl watch`. You don't
   edit code here.
-- **One terminal per lane.** Each runs Claude in its own worktree
+- **One terminal per lane.** Each runs your agent in its own worktree
   (`../<repo>-lanes/<lane>`) on its own branch (`lane/<lane>`).
 - Each agent finishes by running `pl done <lane>`. A reviewer checks the diff,
   and `pl watch` lands every lane that passes with one merge, one test run and one push.
 
 ## Set up once
 
-Needs Python 3.11+, git 2.31+ and Claude Code (`claude`) on your PATH.
+Needs Python 3.11+, git 2.31+ and your CLI agent of choice (Claude Code, Codex,
+Gemini CLI, Aider, ...) on your PATH.
 
 ```bash
 pipx install git+https://github.com/oxgate-inc/plowline
@@ -45,12 +46,12 @@ The wizard asks six things. The defaults are usually right:
 | Remote | `origin` if the repo is on GitHub. `-` for **local-only**: no remote, and the train moves your local `main`. |
 | Trunk | Usually `main`. |
 | Gate | Your full test command, e.g. `npm test` or `python -m pytest -q`. It must pass now. |
-| Reviewer | `builtin:claude`, which reviews each lane's diff with `claude -p`. `-` for none. |
-| Agent | `claude`, or e.g. `claude --model sonnet` to make lanes cheaper. |
+| Reviewer | `builtin:claude` or `builtin:codex`, a command that runs your agent on the diff, or `-` for none. |
+| Agent | The command that starts your agent, e.g. `claude`, `codex`, `gemini` or `aider`, with a cheaper model flag if you like. |
 | Regenerate | Leave empty unless most changes touch a generated file (lockfile, generated docs). |
 
 Say yes to commit, and yes to push if you have a remote. The setup adds the lane
-rules to `CLAUDE.md`, so every Claude session in a lane knows how to behave.
+rules to `AGENTS.md` and `CLAUDE.md`, so the agent in each lane knows how to behave.
 
 ## A working session
 
@@ -59,7 +60,7 @@ touch different files. Write a short brief for each by copying `briefs/TEMPLATE.
 the goal, the files, and how you'll know it's done.
 
 **2. Start them.** Each command creates the worktree and opens a new terminal
-with Claude already told to read its brief:
+with your agent already told to read its brief:
 
 ```bash
 pl new login  --paths src/auth/        --brief briefs/login.md  --open
@@ -83,11 +84,11 @@ reviewer says GO, the next refresh runs a train:
 landed 2 lane(s) on origin/main at 4c94787
 ```
 
-You can also hand step 1 and 2 to Claude: in the control-tower checkout, before
+You can also hand step 1 and 2 to your agent: in the control-tower checkout, before
 `pl watch`, say "split this into lanes: …". The dispatcher skill that setup
 installed has it propose the lanes, write the briefs, and start them once you agree.
 
-**4. Talk to your agents as usual.** Each lane terminal is a normal Claude
+**4. Talk to your agents as usual.** Each lane terminal is a normal agent
 session. Answer its questions, steer it, approve its tools. You never need to
 `cd`, merge or push by hand.
 
@@ -101,7 +102,7 @@ pl clean      # removes landed worktrees and branches
 
 A lane bounces when it conflicts with something that landed first, or when the
 combined tests go red. The other lanes still land. `pl watch` shows the reason.
-Go to that lane's terminal and tell Claude:
+Go to that lane's terminal and tell the agent:
 
 > Your lane bounced. Run `pl resume <lane>` and fix it.
 
@@ -120,8 +121,8 @@ away in its own terminal and fixes them.
 - **Small lanes land.** One feature or fix per lane. Big lanes conflict more and
   are harder to review.
 - **Three is the sweet spot** for one person. You're still the one answering questions.
-- **Watch your usage.** Every lane is a Claude session, and every `pl done` is
-  one more `claude -p` call for the review.
+- **Watch your usage.** Every lane is an agent session, and every `pl done` is
+  one more agent call for the review.
 
 ## Troubleshooting
 

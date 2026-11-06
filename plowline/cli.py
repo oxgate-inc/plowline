@@ -61,6 +61,8 @@ Style preferences are findings, not a NO-GO.
 {diff}
 """
 
+AGENT_CLIS = ("claude", "codex", "gemini", "aider", "cursor-agent", "opencode")  # setup picks the first on PATH
+
 BUILTIN_REVIEWERS = {
     "builtin:claude": ["claude", "-p"],
     "builtin:codex": ["codex", "exec", "-"],
@@ -320,7 +322,7 @@ def cmd_setup(y: Yard, a) -> int:
         trunk = ask("Trunk branch", trunk, interactive)
         gate = ask("Gate: the command that must pass before a push", gate, interactive)
         review = ask("Reviewer (builtin:claude, builtin:codex, a command, or '-' for none)", review, interactive)
-        agent = ask("Command that starts an agent in a lane (used by pl open)", a.agent or "claude", interactive)
+        agent = ask("Command that starts an agent in a lane (used by pl open)", a.agent or next((c for c in AGENT_CLIS if shutil.which(c)), "claude"), interactive)
         regenerate = ask("Command that rebuilds generated files ('-' for none)", a.regenerate or "", interactive) \
             if interactive or a.regenerate else ""
         land, on_land = a.land or "push", a.on_land or ""
@@ -722,7 +724,7 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("--regenerate", help="command that rebuilds generated files")
         p.add_argument("--trunk")
         p.add_argument("--remote", help="remote the train pushes to; '' for local-only")
-        p.add_argument("--agent", help="command `pl open` starts in a lane (default: claude)")
+        p.add_argument("--agent", help="command `pl open` starts in a lane (default: the first agent CLI found on PATH)")
         p.add_argument("--land", choices=("push", "pr"), help="push to the trunk (default) or open a PR per train")
         p.add_argument("--on-land", help="command run after each landing (deploy, tag, notify)")
         p.add_argument("--force", action="store_true", help="rewrite an existing plowline.toml")

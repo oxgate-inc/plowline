@@ -14,7 +14,7 @@ git --version          # need 2.31 or newer
 python --version       # need 3.11 or newer (python3 on some systems)
 git status             # should be clean, on the main branch
 git remote -v          # is there a remote? usually origin
-which claude codex gh  # which agent CLIs and the GitHub CLI are installed
+which claude codex gemini aider gh  # which agent CLIs and the GitHub CLI are installed
 ```
 
 - If the working tree is dirty, stop and ask what to do with the changes.
@@ -44,11 +44,12 @@ know for certain.
 >    **local-only** if there's no remote.
 > 2. **The gate**, the command that must pass before anything lands. I found
 >    `<command>` and it passes now.
-> 3. **Reviewer.** `builtin:claude` (recommended if you use Claude Code),
->    `builtin:codex`, your own command, or none. Each review is one extra agent
->    call per lane.
-> 4. **Lane agent**, the command that starts an agent in a new lane. `claude`,
->    or `claude --model sonnet` to make lanes cheaper, or `codex`.
+> 3. **Reviewer.** `builtin:claude` or `builtin:codex` if they use one of
+>    those, otherwise a command that runs their agent on the diff, or none.
+>    Each review is one extra agent call per lane.
+> 4. **Lane agent**, the command that starts an agent in a new lane: the CLI
+>    agent they already use (`claude`, `codex`, `gemini`, `aider`, ...), with a
+>    cheaper model flag if they want cheaper lanes.
 > 5. **After each landing**, an optional command, such as a staging deploy or a
 >    chat message. Recommended: none for now.
 > 6. **Generated files.** Only if I found some: `<command>` rebuilds them after
@@ -75,9 +76,9 @@ pl setup --yes --commit \
 ```
 
 Setup writes `plowline.toml`, checks that the gate passes, adds the lane rules
-to `AGENTS.md` and `CLAUDE.md`, writes `briefs/TEMPLATE.md` and a dispatcher
-skill at `.claude/skills/plowline/SKILL.md`, and commits them. It never pushes
-unless you add `--push`.
+to `AGENTS.md` and `CLAUDE.md` (between them, read by most CLI agents), writes
+`briefs/TEMPLATE.md` and a dispatcher skill at `.claude/skills/plowline/SKILL.md`,
+and commits them. It never pushes unless you add `--push`.
 
 Show the person `git show --stat HEAD`, then ask before pushing. Lanes branch
 from the remote main, so they only see the setup once it's pushed:
@@ -116,7 +117,7 @@ Offer a five-minute tour. If they say yes:
 
 3. **Tell them they can delegate the dispatching to you.** From now on, in this
    repo, they can say "split this into lanes" or "how are the lanes doing?" to
-   any Claude session in the main checkout. The dispatcher skill tells it how
+   their agent in the main checkout. The dispatcher skill tells it how
    to plan lanes, write briefs, start them, and report back.
 
 4. **Offer to plan their first real lanes.** Ask what they want done next, and
