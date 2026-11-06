@@ -133,6 +133,100 @@ class SoloLocalTest(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
 
+class LandModesTest(unittest.TestCase):
+    """on_land runs after each landing; land = "pr" opens one PR per train and waits for it to merge."""
+
+    def setUp(self):
+        import subprocess
+        import tempfile
+        self.tmp = Path(tempfile.mkdtemp(prefix="plowline-land-")).resolve()
+        self.app = self.tmp / "app"
+        self.run_ = lambda *a, cwd=self.app: subprocess.run(a, cwd=cwd, env=demo.ENV, capture_output=True, text=True)
+        self.pl = lambda *a, cwd=self.app: self.run_(sys.executable, "-m", "plowline", *a, cwd=cwd)
+        self.run_("git", "init", "-q", "--bare", "-b", "main", str(self.tmp / "origin.git"), cwd=self.tmp)
+        self.run_("git", "clone", "-q", str(self.tmp / "origin.git"), str(self.app), cwd=self.tmp)
+        self.run_("git", "checkout", "-q", "-b", "main")
+        (self.app / "hook.py").write_text(
+            "import os, pathlib\n"
+            "keys = ('PLOWLINE_LANES', 'PLOWLINE_COMMIT', 'PLOWLINE_PR')\n"
+            "with pathlib.Path(os.environ['HOOK_LOG']).open('a') as f:\n"
+            "    f.write('|'.join(os.environ[k] for k in keys) + '\\n')\n")
+        self.hook_log = self.tmp / "hook.log"
+        demo.ENV["HOOK_LOG"] = str(self.hook_log)
+
+    def tearDown(self):
+        demo.ENV.pop("HOOK_LOG", None)
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def configure(self, extra: str) -> None:
+        py = Path(sys.executable).as_posix()
+        (self.app / "plowline.toml").write_text(
+            f"[plowline]\ngate = '\"{py}\" -c \"pass\"'\non_land = '\"{py}\" hook.py'\n{extra}")
+        self.run_("git", "add", "-A")
+        self.run_("git", "commit", "-qm", "init")
+        self.run_("git", "push", "-q", "-u", "origin", "main")
+
+    def lane(self, name: str) -> None:
+        self.assertEqual(self.pl("new", name).returncode, 0)
+        wt = self.tmp / "app-lanes" / name
+        (wt / f"{name}.txt").write_text(name)
+        self.run_("git", "add", "-A", cwd=wt)
+        self.run_("git", "commit", "-qm", name, cwd=wt)
+        self.assertEqual(self.pl("done", name).returncode, 0)
+
+    def state(self, name: str) -> str:
+        return next(ln.split()[1] for ln in self.pl("status").stdout.splitlines() if ln.startswith(name))
+
+    def test_on_land_gets_the_landed_lanes_and_commit(self):
+        self.configure("")
+        self.lane("one")
+        train = self.pl("train")
+        self.assertIn("on_land: ok", train.stdout)
+        main = self.run_("git", "rev-parse", "origin/main").stdout.strip()
+        self.assertEqual(self.hook_log.read_text().splitlines(), [f"one|{main}|"])
+
+    def test_pr_mode_opens_a_pr_waits_and_lands_on_merge(self):
+        import json
+        gh = self.tmp / "fake_gh.py"
+        gh.write_text(
+            "import pathlib, sys\n"
+            f"d = pathlib.Path({str(self.tmp)!r})\n"
+            "args = sys.argv[1:]\n"
+            "if args[:2] == ['pr', 'create']:\n"
+            "    (d / 'pr-body.txt').write_text(sys.stdin.read())\n"
+            "    print('https://example.test/pr/1')\n"
+            "elif args[:2] == ['pr', 'view']:\n"
+            "    print((d / 'pr-state.json').read_text())\n")
+        self.configure(f"land = \"pr\"\ngh = '\"{Path(sys.executable).as_posix()}\" \"{gh.as_posix()}\"'\n")
+        pr_state = self.tmp / "pr-state.json"
+
+        self.lane("one")
+        opened = self.pl("train")
+        self.assertIn("opened train PR https://example.test/pr/1", opened.stdout, opened.stderr)
+        self.assertEqual(self.state("one"), "proposed")
+        self.assertIn("lane/one", (self.tmp / "pr-body.txt").read_text())
+        branch = self.run_("git", "ls-remote", "--heads", "origin", "plowline/train-*").stdout.split()[1]
+
+        pr_state.write_text(json.dumps({"state": "OPEN", "mergeCommit": None}))
+        self.assertIn("waiting on train PR", self.pl("train").stdout)
+        self.assertFalse(self.hook_log.exists())
+
+        self.run_("git", "fetch", "-q", "origin")
+        self.run_("git", "push", "-q", "origin", f"{branch}:refs/heads/main")
+        merged = self.run_("git", "rev-parse", branch).stdout.strip()
+        pr_state.write_text(json.dumps({"state": "MERGED", "mergeCommit": {"oid": merged}}))
+        landed = self.pl("train")
+        self.assertIn("train PR merged: landed 1 lane(s)", landed.stdout)
+        self.assertEqual(self.state("one"), "landed")
+        self.assertEqual(self.hook_log.read_text().splitlines(), [f"one|{merged}|https://example.test/pr/1"])
+
+        self.lane("two")
+        self.pl("train")
+        pr_state.write_text(json.dumps({"state": "CLOSED", "mergeCommit": None}))
+        self.pl("train")
+        self.assertEqual(self.state("two"), "bounced")
+
+
 class OverlapTest(unittest.TestCase):
     def test_overlaps(self):
         self.assertTrue(paths_overlap("src/", "src/app.py"))

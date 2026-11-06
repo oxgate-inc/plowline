@@ -57,7 +57,7 @@ pl resume rate-limits   # prints why, and the merge-main-and-fix steps
 | `pl open <lane>` | New terminal with the agent running in that lane. `--print` to only show the command. |
 | `pl show <lane>` | The lane's brief and its latest note. |
 | `pl done <lane>` | Review the lane; on GO it waits for the next train. |
-| `pl train` | Merge candidates, gate once, push once. |
+| `pl train` | Merge candidates, gate once, push once (or open one PR). |
 | `pl watch` | Control tower: live status, and a train whenever a lane is done. |
 | `pl status` | Lanes, states, claims and overlaps. |
 | `pl resume <lane>` | Reopen a bounced lane with the reason and the fix steps. |
@@ -89,6 +89,8 @@ gate = "python -m pytest -q"     # must pass on the merged train before anything
 review = "builtin:claude"        # see Review below
 regenerate = ""                  # optional: rebuild generated files on the merged tree
 agent = "claude"                 # what `pl open` starts in a lane (e.g. "codex", "claude --model sonnet")
+land = "push"                    # "push" to the trunk, or "pr": open one pull request per train
+on_land = ""                     # optional: runs after each landing (deploy, tag, notify)
 worktrees = "../{repo}-lanes"    # where lane worktrees live
 ```
 
@@ -114,6 +116,22 @@ Lane state lives in `.git/plowline/`. It is never committed and never pushed.
 
 The reviewer is a gate, not a substitute for your tests. Keep the real checks in `gate`.
 
+### Landing
+
+| `land =` | What the train does with a green batch |
+|---|---|
+| `"push"` | Pushes it to the trunk (or moves the local trunk in local-only mode). |
+| `"pr"` | Pushes it to a `plowline/train-<time>` branch and opens one pull request with `gh`. The lanes wait as `proposed`, and the next train waits for that PR. When it merges, by any method, the lanes are marked landed. If it is closed unmerged, they bounce. Use it when the trunk is protected or needs a human approval. |
+
+`on_land` runs in the repo root after each landing, once per train. It gets
+`PLOWLINE_TRUNK`, `PLOWLINE_COMMIT`, `PLOWLINE_LANES`,
+`PLOWLINE_BRANCHES` and, in PR mode, `PLOWLINE_PR`. Use it to deploy, tag,
+or post a message. If it fails, the train reports it and the lanes stay landed.
+
+```toml
+on_land = "./scripts/deploy-staging.sh"
+```
+
 ### How a train decides
 
 1. Take every candidate, oldest first.
@@ -122,8 +140,10 @@ The reviewer is a gate, not a substitute for your tests. Keep the real checks in
 3. Run `regenerate` if set, then `gate`, on the merged tree.
 4. If the gate is red, drop the last-added lane (the only one the evidence
    isolates), bounce it, and run the gate again on the rest.
-5. Push once (or, in local-only mode, move the local trunk). If the trunk moved
-   underneath, nothing is marked landed. Run the train again.
+5. Push once (or, in local-only mode, move the local trunk; in PR mode, open
+   the PR). If the trunk moved underneath, nothing is marked landed. Run the
+   train again.
+6. Run `on_land` if set.
 
 ## Why trunk-based, not gitflow?
 
@@ -138,6 +158,13 @@ production). Put human approvals on those promotions rather than on another bran
 - Overlap detection is path-based. It warns, it does not reason about semantics.
 - Local-only mode refuses to land while your trunk checkout has uncommitted
   changes to tracked files. Commit or stash them, and the next train lands.
+- PR mode keeps one train PR open at a time, and needs the GitHub CLI.
+
+## What it is not
+
+Plowline is a local tool. There is no server, no account, no telemetry and no
+dashboard. It talks to git, your gate, your reviewer CLI, and `gh` if you choose
+PR mode. Everything it knows is in `.git/plowline/` on your machine.
 
 ## License
 

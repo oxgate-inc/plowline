@@ -47,6 +47,10 @@ files. It never pushes unless you add `--push`. Options:
   default it uses whichever CLI is on PATH. `--review ""` turns review off.
 - `--regenerate "<command>"` if most changes touch generated files (lockfiles,
   generated docs, schema snapshots) and a command rebuilds them.
+- `--land pr` if the trunk is protected or needs an approval: each train opens
+  one pull request (needs `gh`) instead of pushing. Ask the user if unsure.
+- `--on-land "<command>"` if the user wants something to run after every
+  landing, such as a staging deploy. Only set it if the user asks.
 
 ## 5. Ask before pushing
 

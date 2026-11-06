@@ -35,6 +35,9 @@ DEFAULTS = {
     "worktrees": "../{repo}-lanes",
     "branch_prefix": "lane/",
     "agent": "claude",
+    "land": "push",
+    "on_land": "",
+    "gh": "gh",
 }
 LANE_NAME = re.compile(r"^[a-z0-9][a-z0-9._-]{0,62}$")
 DIFF_LIMIT = 200_000
@@ -106,7 +109,7 @@ class Lane:
     base: str
     paths: list[str] = field(default_factory=list)
     brief: str = ""
-    state: str = "active"  # active | candidate | bounced | landed
+    state: str = "active"  # active | candidate | proposed | bounced | landed
     head: str = ""
     note: str = ""
     queued_at: float = 0.0
@@ -120,6 +123,7 @@ class Yard:
         self.root = self.common.parent
         self.state_dir = self.common / "plowline"
         self.lanes_dir = self.state_dir / "lanes"
+        self.pr_file = self.state_dir / "train-pr.json"
         self.cfg = dict(DEFAULTS)
         cfg_file = self.root / CONFIG_NAME
         if cfg_file.exists():
@@ -194,6 +198,29 @@ class Yard:
                 git("merge", "--ff-only", "--quiet", head, cwd=path)
                 return
         git("update-ref", f"refs/heads/{trunk}", head, tip, cwd=self.root)
+
+    def gh(self, *args: str, stdin: str | None = None) -> str:
+        argv = shlex.split(str(self.cfg["gh"]))
+        exe = shutil.which(argv[0]) if argv else None
+        if not exe:
+            raise YardError(f"land = \"pr\" needs the GitHub CLI ({self.cfg['gh']!r}) on PATH")
+        p = subprocess.run([exe, *argv[1:], *args], cwd=self.root, input=stdin,
+                           capture_output=True, text=True, encoding="utf-8")
+        if p.returncode != 0:
+            raise YardError(f"{self.cfg['gh']} {' '.join(args[:2])} failed:\n{(p.stderr or p.stdout).strip()}")
+        return p.stdout.strip()
+
+    def after_land(self, lanes: list[Lane], commit: str, pr: str = "") -> bool:
+        """Run the on_land hook once per landing. A failure is reported; the lanes stay landed."""
+        cmd = str(self.cfg["on_land"]).strip()
+        if not cmd:
+            return True
+        env = {"PLOWLINE_TRUNK": self.cfg["trunk"], "PLOWLINE_COMMIT": commit,
+               "PLOWLINE_LANES": " ".join(l.name for l in lanes),
+               "PLOWLINE_BRANCHES": " ".join(l.branch for l in lanes), "PLOWLINE_PR": pr}
+        ok, out = shell(cmd, self.root, env)
+        print(f"on_land: {'ok' if ok else 'FAILED (the lanes stay landed)'}" + (f"\n{tail(out)}" if out else ""))
+        return ok
 
     def worktree_dir(self, name: str) -> Path:
         base = Path(self.cfg["worktrees"].format(repo=self.root.name))
@@ -296,8 +323,11 @@ def cmd_setup(y: Yard, a) -> int:
         agent = ask("Command that starts an agent in a lane (used by pl open)", a.agent or "claude", interactive)
         regenerate = ask("Command that rebuilds generated files ('-' for none)", a.regenerate or "", interactive) \
             if interactive or a.regenerate else ""
+        land, on_land = a.land or "push", a.on_land or ""
         if not gate:
             raise YardError("a gate command is required (pass --gate, e.g. --gate \"npm test\")")
+        if land == "pr" and not remote:
+            raise YardError("--land pr needs a remote")
         cfg_file.write_text(
             "[plowline]\n"
             f"trunk = {json.dumps(trunk)}\n"
@@ -306,9 +336,12 @@ def cmd_setup(y: Yard, a) -> int:
             f"review = {json.dumps(review)}  # builtin:claude, builtin:codex, any command (exit 0 = GO), or \"\"\n"
             f"regenerate = {json.dumps(regenerate)}  # optional: rebuilds generated files on the merged tree\n"
             f"agent = {json.dumps(agent)}  # what `pl open` starts in a lane's terminal\n"
+            f"land = {json.dumps(land)}  # \"push\" to the trunk, or \"pr\": open one pull request per train\n"
+            f"on_land = {json.dumps(on_land)}  # optional: runs after each landing (deploy, tag, notify)\n"
             'worktrees = "../{repo}-lanes"\n',
             encoding="utf-8")
-        y.cfg.update(trunk=trunk, remote=remote, gate=gate, review=review, regenerate=regenerate, agent=agent)
+        y.cfg.update(trunk=trunk, remote=remote, gate=gate, review=review, regenerate=regenerate, agent=agent,
+                     land=land, on_land=on_land)
         say(f"wrote {CONFIG_NAME}")
 
     if not a.skip_gate_check:
@@ -433,7 +466,7 @@ def cmd_status(y: Yard, a) -> int:
         print(f"{lane.name:<20} {lane.state:<10} {ahead:>3} ahead  {', '.join(lane.paths) or '-'}")
         for other, p, q in ([] if lane.state == "landed" else y.overlaps(lane)):
             print(f"{'':<20} overlap with {other}: {p} ~ {q}")
-        if lane.note and lane.state in ("bounced", "active"):
+        if lane.note and lane.state in ("bounced", "active", "proposed"):
             print(f"{'':<20} {lane.note.splitlines()[0]}")
     return 0
 
@@ -481,10 +514,42 @@ def bounce(y: Yard, lane: Lane, note: str) -> None:
     print(f"bounced {lane.name}: {note.splitlines()[0]}")
 
 
+def settle_pr(y: Yard) -> bool:
+    """PR mode: settle the last train's pull request. True while it is still open."""
+    if not y.pr_file.exists():
+        return False
+    pr = json.loads(y.pr_file.read_text(encoding="utf-8"))
+    info = json.loads(y.gh("pr", "view", pr["url"], "--json", "state,mergeCommit"))
+    if info.get("state") == "OPEN":
+        print(f"waiting on train PR {pr['url']}")
+        return True
+    lanes = [y.load(n) for n in pr["lanes"] if y.lane_file(n).exists()]
+    if info.get("state") == "MERGED":
+        commit = (info.get("mergeCommit") or {}).get("oid") or pr["head"]
+        for lane in lanes:
+            lane.state, lane.note = "landed", f"landed in {commit} via {pr['url']}"
+            y.save(lane)
+        print(f"train PR merged: landed {len(lanes)} lane(s) at {commit[:9]}")
+        y.after_land(lanes, commit, pr["url"])
+    else:
+        for lane in lanes:
+            bounce(y, lane, f"PR_CLOSED: train PR {pr['url']} was closed without merging.\n"
+                            f"Read the PR, fix what it asks, then `pl done {lane.name}` to queue the lane again.")
+    y.pr_file.unlink()
+    return False
+
+
 def cmd_train(y: Yard, a) -> int:
     if not str(y.cfg["gate"]).strip():
         raise YardError("set `gate` in plowline.toml first")
+    if y.cfg["land"] not in ("push", "pr"):
+        raise YardError(f"land must be \"push\" or \"pr\", not {y.cfg['land']!r}")
+    pr_mode = y.cfg["land"] == "pr"
+    if pr_mode and not y.has_remote():
+        raise YardError("land = \"pr\" needs a remote")
     with y.lock():
+        if pr_mode and settle_pr(y):
+            return 0
         cands = sorted((l for l in y.lanes() if l.state == "candidate"), key=lambda l: l.queued_at)
         if not cands:
             print("no candidates")
@@ -535,8 +600,11 @@ def cmd_train(y: Yard, a) -> int:
                 return 1
             head = git("rev-parse", "HEAD", cwd=scratch)
             if a.dry_run:
-                print(f"dry run: would push {head[:9]} to {base_ref}")
+                print(f"dry run: would {'open a PR for' if pr_mode else 'push'} {head[:9]} to {base_ref}")
                 return 0
+            if pr_mode:
+                open_train_pr(y, merged, head)
+                return 1 if bounced else 0
             if y.has_remote():
                 p = subprocess.run(["git", "push", "--quiet", y.cfg["remote"], f"HEAD:refs/heads/{y.cfg['trunk']}"],
                                    cwd=scratch, capture_output=True, text=True)
@@ -549,9 +617,33 @@ def cmd_train(y: Yard, a) -> int:
                 lane.state, lane.note = "landed", f"landed in {head}"
                 y.save(lane)
             print(f"landed {len(merged)} lane(s) on {base_ref} at {head[:9]}")
-            return 1 if bounced else 0
+            hook_ok = y.after_land([l for l, _ in merged], head)
+            return 1 if bounced or not hook_ok else 0
         finally:
             git("worktree", "remove", "--force", str(scratch), cwd=y.root, check=False)
+
+
+def open_train_pr(y: Yard, merged: list[tuple[Lane, str]], head: str) -> None:
+    """PR mode: push the gated train to its own branch and open one pull request for it."""
+    branch = f"plowline/train-{time.strftime('%Y%m%d-%H%M%S')}"
+    p = subprocess.run(["git", "push", "--quiet", y.cfg["remote"], f"{head}:refs/heads/{branch}"],
+                       cwd=y.root, capture_output=True, text=True)
+    if p.returncode != 0:
+        raise YardError(f"push of {branch} refused; candidates are unchanged\n{p.stderr.strip()}")
+    lanes = [l for l, _ in merged]
+    body = "Lanes in this train, merged onto the trunk and gated together:\n\n" + "".join(
+        f"- `{l.branch}`: {(l.brief.strip().splitlines() or ['(no brief)'])[0].lstrip('# ')}\n" for l in lanes) + (
+        f"\nGate passed on the merged tree: `{y.cfg['gate']}`\n\n"
+        "Merge it with any method. `pl train` or `pl watch` notices the merge and marks the lanes landed.\n")
+    out = y.gh("pr", "create", "--base", y.cfg["trunk"], "--head", branch,
+               "--title", f"plowline: land {', '.join(l.name for l in lanes)}", "--body-file", "-", stdin=body)
+    url = out.splitlines()[-1].strip() if out else branch
+    for lane in lanes:
+        lane.state, lane.note = "proposed", f"in train PR {url}"
+        y.save(lane)
+    y.pr_file.write_text(json.dumps({"url": url, "branch": branch, "head": head,
+                                     "lanes": [l.name for l in lanes]}, indent=2), encoding="utf-8")
+    print(f"opened train PR {url} for {len(lanes)} lane(s); the next train waits for it")
 
 
 def cmd_resume(y: Yard, a) -> int:
@@ -593,7 +685,7 @@ def cmd_watch(y: Yard, a) -> int:
     events: list[str] = []
     try:
         while True:
-            if any(l.state == "candidate" for l in y.lanes()) and not a.no_train:
+            if any(l.state in ("candidate", "proposed") for l in y.lanes()) and not a.no_train:
                 buf = io.StringIO()
                 with redirect_stdout(buf):
                     try:
@@ -629,6 +721,8 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("--trunk")
         p.add_argument("--remote", help="remote the train pushes to; '' for local-only")
         p.add_argument("--agent", help="command `pl open` starts in a lane (default: claude)")
+        p.add_argument("--land", choices=("push", "pr"), help="push to the trunk (default) or open a PR per train")
+        p.add_argument("--on-land", help="command run after each landing (deploy, tag, notify)")
         p.add_argument("--force", action="store_true", help="rewrite an existing plowline.toml")
         p.add_argument("--skip-gate-check", action="store_true")
         p.add_argument("--no-agent-files", action="store_true", help="leave AGENTS.md, CLAUDE.md and briefs/ alone")

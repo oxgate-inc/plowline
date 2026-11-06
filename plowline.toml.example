@@ -4,4 +4,6 @@ remote = "origin"
 gate = "python -m pytest -q"     # must pass on the merged train before anything is pushed
 review = "builtin:claude"        # "builtin:codex", any command (exit 0 = GO), or "" for none
 regenerate = ""                  # optional: rebuild generated files on the merged tree
+land = "push"                    # "push" to the trunk, or "pr": open one pull request per train
+on_land = ""                     # optional: runs after each landing (deploy, tag, notify)
 worktrees = "../{repo}-lanes"    # where lane worktrees live
