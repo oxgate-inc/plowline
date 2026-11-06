@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg id="OXGATE" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 340 360">
+  <defs>
+    <style>
+      .cls-1 {
+        fill: #0b3d2e;
+      }
+
+      .cls-1, .cls-2 {
+        stroke-width: 0px;
+      }
+
+      .cls-2 {
+        fill: #b99153;
+      }
+    </style>
+  </defs>
+  <g id="Mark">
+    <polygon class="cls-1" points="8.13 10.74 8.13 349.26 72.69 349.26 118.82 262.62 99.08 262.62 99.08 97.38 240.92 97.38 240.92 262.62 221.11 262.62 267.31 349.26 331.87 349.26 331.87 10.74 8.13 10.74"/>
+    <polygon class="cls-2" points="137.13 262.58 93.54 349.22 246.46 349.22 202.87 262.58 137.13 262.58"/>
+  </g>
+</svg>

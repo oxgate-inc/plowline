@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "plowline"
+version = "0.1.0"
+description = "Run many coding agents on one repo: a worktree per agent, a merge train to land them."
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.11"
+authors = [{ name = "Oxgate, Inc." }]
+
+[project.scripts]
+yard = "plowline.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/oxgate-inc/plowline"
+
+[tool.setuptools]
+packages = ["plowline"]

@@ -1,0 +1,7 @@
+[plowline]
+trunk = "main"
+remote = "origin"
+gate = "python -m pytest -q"     # must pass on the merged train before anything is pushed
+review = "builtin:claude"        # "builtin:codex", any command (exit 0 = GO), or "" for none
+regenerate = ""                  # optional: rebuild generated files on the merged tree
+worktrees = "../{repo}-lanes"    # where lane worktrees live

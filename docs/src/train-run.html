@@ -1,0 +1,27 @@
+<!doctype html><html><head><meta charset="utf-8"><style>
+html,body{margin:0;background:#f4f1ea}
+.wrap{width:1280px;height:720px;display:flex;align-items:center;justify-content:center}
+.win{width:1140px;background:#0b3d2e;border-radius:16px;box-shadow:0 24px 60px rgba(11,61,46,.25);overflow:hidden}
+.bar{display:flex;align-items:center;gap:9px;padding:16px 22px;background:#08301f;color:#f4f1ea;font:500 16px "Segoe UI",sans-serif}
+.dot{width:13px;height:13px;border-radius:50%;background:#f4f1ea;opacity:.25}
+.title{margin-left:14px;opacity:.75;flex:1}
+pre{margin:0;padding:26px 34px 30px;color:#f4f1ea;font:19px/1.6 "Cascadia Mono",Consolas,monospace;white-space:pre}
+.p{color:#b99153}.dim{opacity:.55}.b{color:#b99153;font-weight:700}.l{font-weight:700}
+</style></head><body><div class="wrap"><div class="win">
+<div class="bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span>
+<span class="title">5 agents, 1 train, nothing rebased</span>
+<svg width="22" height="23" viewBox="0 0 340 360"><polygon fill="#f4f1ea" points="8.13 10.74 8.13 349.26 72.69 349.26 118.82 262.62 99.08 262.62 99.08 97.38 240.92 97.38 240.92 262.62 221.11 262.62 267.31 349.26 331.87 349.26 331.87 10.74 8.13 10.74"/><polygon fill="#b99153" points="137.13 262.58 93.54 349.22 246.46 349.22 202.87 262.58 137.13 262.58"/></svg></div>
+<pre><span class="p">$</span> yard train
+<span class="b">bounced</span> d: MERGE_CONFLICT with origin/main 8554b6dec: shared.txt
+gate on 4 lane(s): a, b, c, e
+<span class="b">bounced</span> e: GATE_FAIL on the train with a, b, c, e; e was added last.
+gate on 3 lane(s): a, b, c
+<span class="l">landed 3 lane(s)</span> on origin/main at af851c2eb
+
+<span class="p">$</span> yard status
+a      <span class="l">landed </span>   0 ahead  a.txt
+b      <span class="l">landed </span>   0 ahead  b.txt
+c      <span class="l">landed </span>   0 ahead  shared.txt
+d      <span class="b">bounced</span>   1 ahead  shared.txt   <span class="dim"># yard resume d: merge main, fix, retry</span>
+e      <span class="b">bounced</span>   1 ahead  e.txt        <span class="dim"># the gate went red; a, b, c still landed</span></pre>
+</div></div></body></html>
