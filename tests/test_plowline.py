@@ -60,6 +60,41 @@ class ReviewTest(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
 
+class SetupWizardTest(unittest.TestCase):
+    def test_wizard_answers_land_in_config_and_agent_files(self):
+        import os
+        import subprocess
+        import tempfile
+        from unittest import mock
+
+        from plowline import cli
+        tmp = Path(tempfile.mkdtemp(prefix="plowline-setup-"))
+        cwd = os.getcwd()
+        try:
+            app = tmp / "app"
+            run = lambda *a, cwd=app: subprocess.run(a, cwd=cwd, env=demo.ENV, capture_output=True, text=True)
+            run("git", "init", "-q", "--bare", "-b", "main", str(tmp / "origin.git"), cwd=tmp)
+            run("git", "clone", "-q", str(tmp / "origin.git"), str(app), cwd=tmp)
+            (app / "AGENTS.md").write_text("# Existing rules\n")
+            os.chdir(app)
+            # remote, trunk, gate, review ('-' = none), regenerate, commit?, push?
+            answers = iter(["", "", f'"{sys.executable}" -c "pass"', "-", "-", "n", "n"])
+            with mock.patch.object(sys.stdin, "isatty", return_value=True), \
+                    mock.patch("builtins.input", lambda _: next(answers)), \
+                    mock.patch.dict(os.environ, {k: v for k, v in demo.ENV.items() if k.startswith("GIT_")}):
+                self.assertEqual(cli.main(["setup"]), 0)
+            cfg = (app / "plowline.toml").read_text()
+            self.assertIn('review = ""', cfg)
+            self.assertIn(sys.executable.replace("\\", "\\\\"), cfg)
+            agents = (app / "AGENTS.md").read_text()
+            self.assertTrue(agents.startswith("# Existing rules"))
+            self.assertIn(cli.AGENT_RULES_HEADING, agents)
+            self.assertTrue((app / "CLAUDE.md").exists() and (app / "briefs" / "TEMPLATE.md").exists())
+        finally:
+            os.chdir(cwd)
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
 class OverlapTest(unittest.TestCase):
     def test_overlaps(self):
         self.assertTrue(paths_overlap("src/", "src/app.py"))

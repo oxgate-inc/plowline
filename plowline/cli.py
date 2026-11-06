@@ -223,33 +223,111 @@ class Yard:
 
 
 # --- commands -------------------------------------------------------------
-def cmd_init(y: Yard, a) -> int:
+AGENT_RULES_HEADING = "## Working in a Plowline lane"
+GATE_GUESSES = (("pyproject.toml", "python -m pytest -q"), ("package.json", "npm test"),
+                ("go.mod", "go test ./..."), ("Cargo.toml", "cargo test"),
+                ("pom.xml", "mvn -q test"), ("Makefile", "make test"))
+
+
+def template(name: str) -> str:
+    return (Path(__file__).parent / "templates" / name).read_text(encoding="utf-8")
+
+
+def ask(prompt: str, default: str, interactive: bool) -> str:
+    if not interactive:
+        return default
+    answer = input(f"{prompt} [{default}]: ").strip()
+    return "" if answer == "-" else answer or default
+
+
+def confirm(prompt: str, interactive: bool, default: bool) -> bool:
+    if not interactive:
+        return default
+    answer = input(f"{prompt} [{'Y/n' if default else 'y/N'}]: ").strip().lower()
+    return default if not answer else answer.startswith("y")
+
+
+def cmd_setup(y: Yard, a) -> int:
+    """Interactive wizard for people; with --yes (or no terminal) it runs unattended for agents."""
+    interactive = not a.yes and sys.stdin.isatty()
+    say = print
+    version = tuple(int(n) for n in re.findall(r"\d+", git("--version", cwd=y.root))[:2])
+    if version < (2, 31):
+        raise YardError(f"git 2.31 or newer is needed (found {'.'.join(map(str, version))})")
+    remotes = git("remote", cwd=y.root).split()
+    if not remotes:
+        raise YardError("this repository has no remote; the train pushes to one (add it with `git remote add origin <url>`)")
+
     cfg_file = y.root / CONFIG_NAME
-    if cfg_file.exists():
-        print(f"{cfg_file} already exists")
-        return 0
-    trunk = git("symbolic-ref", "--short", "-q", "refs/remotes/origin/HEAD", cwd=y.root, check=False)
-    trunk = trunk.split("/", 1)[1] if "/" in trunk else (git("branch", "--show-current", cwd=y.root) or "main")
-    gate = ""
-    for marker, cmd in (("pyproject.toml", "python -m pytest -q"), ("package.json", "npm test"),
-                        ("go.mod", "go test ./..."), ("Cargo.toml", "cargo test"),
-                        ("pom.xml", "mvn -q test"), ("Makefile", "make test")):
-        if (y.root / marker).exists():
-            gate = cmd
-            break
-    cfg_file.write_text(
-        "[plowline]\n"
-        f'trunk = "{trunk}"\n'
-        'remote = "origin"\n'
-        f'gate = "{gate}"          # must pass on the merged train before anything is pushed\n'
-        'review = ""            # "builtin:claude", "builtin:codex", any command (exit 0 = GO), or "" for none\n'
-        'regenerate = ""        # optional: rebuilds generated files on the merged tree before the gate\n'
-        'worktrees = "../{repo}-lanes"\n',
-        encoding="utf-8")
-    print(f"wrote {cfg_file}")
-    if not gate:
-        print("set `gate` to your test command before running a train")
-    print("commit plowline.toml to the trunk so every lane sees it")
+    if cfg_file.exists() and not a.force:
+        say(f"keeping the existing {CONFIG_NAME} (use --force to rewrite it)")
+    else:
+        remote = a.remote or ("origin" if "origin" in remotes else remotes[0])
+        head = git("symbolic-ref", "--short", "-q", f"refs/remotes/{remote}/HEAD", cwd=y.root, check=False)
+        trunk = a.trunk or (head.split("/", 1)[1] if "/" in head else git("branch", "--show-current", cwd=y.root) or "main")
+        gate = a.gate if a.gate is not None else next(
+            (cmd for marker, cmd in GATE_GUESSES if (y.root / marker).exists()), "")
+        review = a.review if a.review is not None else next(
+            (spec for spec, argv in BUILTIN_REVIEWERS.items() if shutil.which(argv[0])), "")
+        if interactive:
+            say("Plowline setup. Press Enter to keep a default, '-' to leave a value empty.\n")
+        remote = ask("Remote the train pushes to", remote, interactive)
+        trunk = ask("Trunk branch", trunk, interactive)
+        gate = ask("Gate: the command that must pass before a push", gate, interactive)
+        review = ask("Reviewer (builtin:claude, builtin:codex, a command, or '-' for none)", review, interactive)
+        regenerate = ask("Command that rebuilds generated files ('-' for none)", a.regenerate or "", interactive) \
+            if interactive or a.regenerate else ""
+        if not gate:
+            raise YardError("a gate command is required (pass --gate, e.g. --gate \"npm test\")")
+        cfg_file.write_text(
+            "[plowline]\n"
+            f"trunk = {json.dumps(trunk)}\n"
+            f"remote = {json.dumps(remote)}\n"
+            f"gate = {json.dumps(gate)}  # must pass on the merged train before anything is pushed\n"
+            f"review = {json.dumps(review)}  # builtin:claude, builtin:codex, any command (exit 0 = GO), or \"\"\n"
+            f"regenerate = {json.dumps(regenerate)}  # optional: rebuilds generated files on the merged tree\n"
+            'worktrees = "../{repo}-lanes"\n',
+            encoding="utf-8")
+        y.cfg.update(trunk=trunk, remote=remote, gate=gate, review=review, regenerate=regenerate)
+        say(f"wrote {CONFIG_NAME}")
+
+    if not a.skip_gate_check:
+        say(f"checking the gate on this checkout: {y.cfg['gate']}")
+        ok, out = shell(y.cfg["gate"], y.root)
+        if not ok:
+            raise YardError(f"the gate fails before any lane exists; fix the trunk first\n{tail(out)}")
+        say("gate passes")
+
+    touched = [CONFIG_NAME]
+    if not a.no_agent_files:
+        rules = template("AGENTS-snippet.md")
+        for name in ("AGENTS.md", "CLAUDE.md"):
+            f = y.root / name
+            text = f.read_text(encoding="utf-8") if f.exists() else ""
+            if AGENT_RULES_HEADING not in text:
+                f.write_text((text.rstrip() + "\n\n" if text.strip() else "") + rules, encoding="utf-8")
+                say(f"added lane rules to {name}")
+                touched.append(name)
+        brief = y.root / "briefs" / "TEMPLATE.md"
+        if not brief.exists():
+            brief.parent.mkdir(exist_ok=True)
+            brief.write_text(template("lane-brief.md"), encoding="utf-8")
+            say("wrote briefs/TEMPLATE.md")
+            touched.append("briefs/TEMPLATE.md")
+
+    if confirm("Commit these files on the current branch?", interactive, a.commit):
+        git("add", "--", *touched, cwd=y.root)
+        if git("diff", "--cached", "--name-only", cwd=y.root):
+            git("commit", "--quiet", "-m", "Add Plowline lane setup", cwd=y.root)
+            say("committed: Add Plowline lane setup")
+    if confirm(f"Push to {y.cfg['remote']}/{y.cfg['trunk']} now?", interactive, a.push):
+        git("push", "--quiet", y.cfg["remote"], f"HEAD:refs/heads/{y.cfg['trunk']}", cwd=y.root)
+        say(f"pushed to {y.cfg['remote']}/{y.cfg['trunk']}")
+    else:
+        say(f"lanes branch from {y.cfg['remote']}/{y.cfg['trunk']}: push this commit before `yard new`")
+    say("\nnext:\n  yard new <lane> --paths <dirs or files> --brief briefs/<lane>.md\n"
+        "  start one agent per lane in the worktree it prints\n"
+        "  yard done <lane>\n  yard train")
     return 0
 
 
@@ -365,7 +443,9 @@ def cmd_train(y: Yard, a) -> int:
                 if p.returncode != 0:
                     paths = git("diff", "--name-only", "--diff-filter=U", cwd=scratch, check=False)
                     git("merge", "--abort", cwd=scratch, check=False)
-                    bounce(y, lane, f"MERGE_CONFLICT with {base_ref} {tip[:9]}: "
+                    against = f"{base_ref} {tip[:9]}" + (
+                        f" + lanes {', '.join(l.name for l, _ in merged)} from this train" if merged else "")
+                    bounce(y, lane, f"MERGE_CONFLICT with {against}: "
                                     f"{', '.join(paths.split()) or 'see git output'}\n"
                                     f"Merge {base_ref} into {lane.branch}, resolve, re-test, then `yard done {lane.name}`.")
                     bounced += 1
@@ -445,7 +525,19 @@ def cmd_clean(y: Yard, a) -> int:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="yard", description="Run many coding agents on one repo.")
     sub = ap.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("init", help="write plowline.toml")
+    for cmd in ("setup", "init"):
+        p = sub.add_parser(cmd, help="set up this repo (wizard; --yes for agents)" if cmd == "setup" else "alias for setup")
+        p.add_argument("--yes", action="store_true", help="no prompts; take detected defaults and flags")
+        p.add_argument("--gate", help="command that must pass before a push")
+        p.add_argument("--review", help="builtin:claude, builtin:codex, a command, or '' for none")
+        p.add_argument("--regenerate", help="command that rebuilds generated files")
+        p.add_argument("--trunk")
+        p.add_argument("--remote")
+        p.add_argument("--force", action="store_true", help="rewrite an existing plowline.toml")
+        p.add_argument("--skip-gate-check", action="store_true")
+        p.add_argument("--no-agent-files", action="store_true", help="leave AGENTS.md, CLAUDE.md and briefs/ alone")
+        p.add_argument("--commit", action="store_true", help="commit the setup (unattended mode)")
+        p.add_argument("--push", action="store_true", help="push the setup commit (unattended mode)")
     p = sub.add_parser("new", help="start a lane: worktree + branch + claim")
     p.add_argument("name")
     p.add_argument("--paths", nargs="*", help="files or globs this lane expects to touch")
@@ -464,7 +556,7 @@ def main(argv: list[str] | None = None) -> int:
     a = ap.parse_args(argv)
     try:
         y = Yard(Path.cwd())
-        return {"init": cmd_init, "new": cmd_new, "status": cmd_status, "show": cmd_show,
+        return {"setup": cmd_setup, "init": cmd_setup, "new": cmd_new, "status": cmd_status, "show": cmd_show,
                 "done": cmd_done, "train": cmd_train, "resume": cmd_resume,
                 "clean": cmd_clean}[a.cmd](y, a)
     except YardError as e:

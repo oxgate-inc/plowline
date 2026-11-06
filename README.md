@@ -22,8 +22,10 @@ Needs Python 3.11+ and git 2.31+. No other dependencies.
 ```bash
 pipx install git+https://github.com/oxgate-inc/plowline
 cd your-repo
-yard init                 # writes plowline.toml; set `gate` to your test command, commit it
+yard setup                # wizard: gate, reviewer, lane rules for your agents, commit
 ```
+
+Agents run the same thing unattended: `yard setup --yes --commit --gate "npm test"`.
 
 Start lanes and point one agent at each worktree:
 

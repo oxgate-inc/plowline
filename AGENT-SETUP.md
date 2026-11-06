@@ -8,11 +8,13 @@ only where a step says to.
 
 ```bash
 git --version      # need 2.31 or newer
-python3 --version  # need 3.11 or newer (on Windows: python --version)
+python --version   # need 3.11 or newer (python3 on some systems)
 git remote -v      # the train pushes to a remote, normally origin
+git status         # should be clean, on the trunk branch
 ```
 
 If there is no remote, stop and ask the user which remote the train should push to.
+If the working tree is dirty, stop and ask the user what to do with the changes.
 
 ## 2. Install
 
@@ -20,64 +22,42 @@ If there is no remote, stop and ask the user which remote the train should push 
 pipx install git+https://github.com/oxgate-inc/plowline
 ```
 
-If `pipx` is missing, use `python3 -m pip install --user git+https://github.com/oxgate-inc/plowline`.
+If `pipx` is missing, use `python -m pip install git+https://github.com/oxgate-inc/plowline`.
 Confirm with `yard --help`.
 
-## 3. Write the config
+## 3. Find the gate
 
-From the repository root:
+The gate is the command that proves the repository works. Every train must pass
+it before anything is pushed. Use what CI already runs: look in
+`.github/workflows/`, `Makefile`, `package.json`, `pyproject.toml`. Prefer the
+full test suite, plus the build or lint step if CI runs one. Run it once and
+confirm it passes. If it fails before any lane exists, stop and tell the user.
 
-```bash
-yard init
-```
-
-Open `plowline.toml` and set `gate` to the command that proves the repository
-works: the full test suite, plus the build or lint step if CI runs one. Use what
-CI already runs (look in `.github/workflows/`, `Makefile`, `package.json`,
-`pyproject.toml`). Run the gate once on a clean checkout and confirm it passes.
-If it fails before any lane exists, stop and tell the user. The train cannot
-work on a red trunk.
-
-Set `review`:
-- `"builtin:claude"` if `claude` is on PATH, or `"builtin:codex"` if `codex` is.
-- `""` if the user wants no automated review.
-
-If the repository has generated files that most changes touch (lockfiles,
-generated docs, schema snapshots), set `regenerate` to the command that rebuilds them.
-
-## 4. Add the lane rules for agents
-
-Append [templates/AGENTS-snippet.md](templates/AGENTS-snippet.md) to `AGENTS.md`
-(Codex and most agents read it) and to `CLAUDE.md` (Claude Code reads it).
-Create either file if it does not exist. Copy
-[templates/lane-brief.md](templates/lane-brief.md) to `briefs/TEMPLATE.md`.
-
-## 5. Commit on the trunk
+## 4. Run setup unattended
 
 ```bash
-git add plowline.toml AGENTS.md CLAUDE.md briefs/TEMPLATE.md
-git commit -m "Add Plowline lane setup"
+yard setup --yes --commit --gate "<the gate command>"
 ```
 
-Show the user the diff and ask before pushing. Lanes branch from the remote
-trunk, so they only see the config after this commit is pushed.
+It writes `plowline.toml`, checks the gate passes, adds the lane rules to
+`AGENTS.md` and `CLAUDE.md`, writes `briefs/TEMPLATE.md`, and commits those
+files. It never pushes unless you add `--push`. Options:
 
-## 6. Prove it
+- `--review builtin:claude` or `--review builtin:codex` picks the reviewer. By
+  default it uses whichever CLI is on PATH. `--review ""` turns review off.
+- `--regenerate "<command>"` if most changes touch generated files (lockfiles,
+  generated docs, schema snapshots) and a command rebuilds them.
 
-Clone Plowline to a scratch directory and run its demo. It builds a throwaway
-repository and touches nothing of the user's:
+## 5. Ask before pushing
+
+Show the user `git show --stat HEAD` and ask whether to push it. Lanes branch
+from the remote trunk, so they only see the setup after it is pushed:
 
 ```bash
-git clone https://github.com/oxgate-inc/plowline /tmp/plowline
-python3 /tmp/plowline/examples/demo.py
+git push origin HEAD:main     # use the trunk name from plowline.toml
 ```
 
-Expect three lanes to land, one to bounce on a conflict and land after
-`yard resume`, and one to bounce on a red gate.
-
-## 7. Tell the user how to run lanes
-
-Give them this, with their own lane names:
+## 6. Tell the user how to run lanes
 
 ```bash
 yard new <lane> --paths <dirs or files> --brief briefs/<lane>.md
@@ -86,3 +66,6 @@ yard done <lane>     # when the agent has committed
 yard train           # lands every candidate, one push
 yard status
 ```
+
+A person can run `yard setup` with no flags for the same steps as an
+interactive wizard.

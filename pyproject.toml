@@ -19,3 +19,6 @@ Homepage = "https://github.com/oxgate-inc/plowline"
 
 [tool.setuptools]
 packages = ["plowline"]
+
+[tool.setuptools.package-data]
+plowline = ["templates/*.md"]
