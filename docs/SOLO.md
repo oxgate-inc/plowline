@@ -83,6 +83,10 @@ reviewer says GO, the next refresh runs a train:
 landed 2 lane(s) on origin/main at 4c94787
 ```
 
+You can also hand step 1 and 2 to Claude: in the control-tower checkout, before
+`pl watch`, say "split this into lanes: …". The dispatcher skill that setup
+installed has it propose the lanes, write the briefs, and start them once you agree.
+
 **4. Talk to your agents as usual.** Each lane terminal is a normal Claude
 session. Answer its questions, steer it, approve its tools. You never need to
 `cd`, merge or push by hand.

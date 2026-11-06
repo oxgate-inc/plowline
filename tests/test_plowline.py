@@ -90,6 +90,9 @@ class SetupWizardTest(unittest.TestCase):
             self.assertTrue(agents.startswith("# Existing rules"))
             self.assertIn(cli.AGENT_RULES_HEADING, agents)
             self.assertTrue((app / "CLAUDE.md").exists() and (app / "briefs" / "TEMPLATE.md").exists())
+            skill = (app / ".claude" / "skills" / "plowline" / "SKILL.md").read_text()
+            self.assertTrue(skill.startswith("---\nname: plowline\n"))
+            self.assertIn(".claude/skills/plowline/SKILL.md", agents)
         finally:
             os.chdir(cwd)
             shutil.rmtree(tmp, ignore_errors=True)

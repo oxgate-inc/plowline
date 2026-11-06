@@ -361,12 +361,14 @@ def cmd_setup(y: Yard, a) -> int:
                 f.write_text((text.rstrip() + "\n\n" if text.strip() else "") + rules, encoding="utf-8")
                 say(f"added lane rules to {name}")
                 touched.append(name)
-        brief = y.root / "briefs" / "TEMPLATE.md"
-        if not brief.exists():
-            brief.parent.mkdir(exist_ok=True)
-            brief.write_text(template("lane-brief.md"), encoding="utf-8")
-            say("wrote briefs/TEMPLATE.md")
-            touched.append("briefs/TEMPLATE.md")
+        for rel, name in (("briefs/TEMPLATE.md", "lane-brief.md"),
+                          (".claude/skills/plowline/SKILL.md", "dispatcher-skill.md")):
+            f = y.root / rel
+            if not f.exists():
+                f.parent.mkdir(parents=True, exist_ok=True)
+                f.write_text(template(name), encoding="utf-8")
+                say(f"wrote {rel}")
+                touched.append(rel)
 
     if confirm("Commit these files on the current branch?", interactive, a.commit):
         git("add", "--", *touched, cwd=y.root)
@@ -725,7 +727,7 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("--on-land", help="command run after each landing (deploy, tag, notify)")
         p.add_argument("--force", action="store_true", help="rewrite an existing plowline.toml")
         p.add_argument("--skip-gate-check", action="store_true")
-        p.add_argument("--no-agent-files", action="store_true", help="leave AGENTS.md, CLAUDE.md and briefs/ alone")
+        p.add_argument("--no-agent-files", action="store_true", help="leave AGENTS.md, CLAUDE.md, briefs/ and .claude/skills/ alone")
         p.add_argument("--commit", action="store_true", help="commit the setup (unattended mode)")
         p.add_argument("--push", action="store_true", help="push the setup commit (unattended mode)")
     p = sub.add_parser("new", help="start a lane: worktree + branch + claim")
@@ -751,7 +753,17 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("resume", help="reopen a bounced lane")
     p.add_argument("name")
     sub.add_parser("clean", help="remove worktrees and branches of landed lanes")
+    p = sub.add_parser("demo", help="five lanes and two trains in a throwaway repo")
+    p.add_argument("--keep", action="store_true", help="keep the throwaway repo to look around")
     a = ap.parse_args(argv)
+    if a.cmd == "demo":
+        from plowline import demo
+        result = demo.run()
+        if a.keep:
+            print(f"kept {result['tmp']}")
+        else:
+            shutil.rmtree(result["tmp"], ignore_errors=True)
+        return 0
     try:
         y = Yard(Path.cwd())
         return {"setup": cmd_setup, "init": cmd_setup, "new": cmd_new, "status": cmd_status, "show": cmd_show,

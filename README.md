@@ -62,20 +62,37 @@ pl resume rate-limits   # prints why, and the merge-main-and-fix steps
 | `pl status` | Lanes, states, claims and overlaps. |
 | `pl resume <lane>` | Reopen a bounced lane with the reason and the fix steps. |
 | `pl clean` | Remove worktrees and branches of landed lanes. |
+| `pl demo` | Five lanes and two trains in a throwaway repo. `--keep` to look around after. |
 
 <p align="center"><img src="docs/train-run.png" alt="A train run: three lanes land, a conflict and a red gate bounce" width="100%"></p>
 
 Watch it end to end in a throwaway repo:
 
 ```bash
-python examples/demo.py
+pl demo
 ```
 
 ## Have an agent set it up
 
-Point your agent at [AGENT-SETUP.md](AGENT-SETUP.md). It installs Plowline,
-finds your test command, adds the lane rules to `AGENTS.md` / `CLAUDE.md`, and
-proves the setup with the demo.
+Paste this into Claude Code, Codex or any coding agent, in your repo:
+
+```text
+Set up Plowline in this repo by following
+https://github.com/oxgate-inc/plowline/blob/main/AGENT-SETUP.md
+```
+
+The agent looks around first: your test command, your remote, whether main is
+protected, which agent CLIs you have. Then it asks you the setup choices in one
+message, with a recommendation for each, and runs the setup. Afterwards it gives
+you a short tour with `pl demo` and offers to plan your first lanes.
+
+### Let your agent dispatch
+
+Setup also installs a dispatcher skill at `.claude/skills/plowline/SKILL.md`,
+and `AGENTS.md` points Codex and other agents to it. In the main checkout, say
+"split this into lanes" and the agent plans small lanes that touch different
+files, writes their briefs, starts them once you agree, and reports what
+landed. It never edits a lane or pushes to main itself.
 
 ## Configuration
 

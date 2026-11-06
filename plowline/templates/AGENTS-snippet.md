@@ -1,6 +1,8 @@
 ## Working in a Plowline lane
 
 This repository runs several agents at once. Each agent works in its own lane.
+If you are in the main checkout rather than a lane, and the user wants work
+split across agents, follow `.claude/skills/plowline/SKILL.md` instead.
 
 - Work only inside the worktree your lane was given. Never edit the main checkout
   or another lane's worktree.
