@@ -231,6 +231,89 @@ class LandModesTest(unittest.TestCase):
         self.assertEqual(self.state("two"), "bounced")
 
 
+class StanchionHookTest(unittest.TestCase):
+    """With env = "stanchion", lanes get `stanchion up` when they open or resume and `stanchion down` when they land or bounce."""
+
+    def setUp(self):
+        import subprocess
+        import tempfile
+        self.tmp = Path(tempfile.mkdtemp(prefix="plowline-stanchion-")).resolve()
+        self.app = self.tmp / "app"
+        self.app.mkdir()
+        self.run_ = lambda *a, cwd=self.app: subprocess.run(a, cwd=cwd, env=demo.ENV, capture_output=True, text=True)
+        self.pl = lambda *a, cwd=self.app: self.run_(sys.executable, "-m", "plowline", *a, cwd=cwd)
+        self.log = self.tmp / "stanchion.log"
+        self.fake = self.tmp / "fake_stanchion.py"
+        self.fake.write_text(f"import sys\nwith open({str(self.log)!r}, 'a') as f:\n"
+                             "    f.write(' '.join(sys.argv[1:]) + '\\n')\nprint('stanchion ok')\n")
+        self.run_("git", "init", "-q", "-b", "main")
+        (self.app / "gate.py").write_text("import pathlib, sys\nsys.exit(pathlib.Path('red.txt').exists())\n")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def configure(self, stanchion: str) -> None:
+        py = Path(sys.executable).as_posix()
+        (self.app / "plowline.toml").write_text(
+            f"[plowline]\nremote = \"\"\nreview = \"\"\ngate = '\"{py}\" gate.py'\n{stanchion}")
+        self.run_("git", "add", "-A")
+        self.run_("git", "commit", "-qm", "init")
+
+    def lane(self, name: str) -> Path:
+        new = self.pl("new", name)
+        self.assertEqual(new.returncode, 0, new.stderr)
+        wt = self.tmp / "app-lanes" / name
+        (wt / f"{name}.txt").write_text(name)
+        self.run_("git", "add", "-A", cwd=wt)
+        self.run_("git", "commit", "-qm", name, cwd=wt)
+        self.assertEqual(self.pl("done", name).returncode, 0)
+        return wt
+
+    def calls(self) -> list[str]:
+        return self.log.read_text().splitlines() if self.log.exists() else []
+
+    def test_lanes_get_up_on_open_and_down_on_land_and_bounce(self):
+        py = Path(sys.executable).as_posix()
+        self.configure(f"env = \"stanchion\"\n\n[stanchion]\ncommand = '\"{py}\" \"{self.fake.as_posix()}\"'\n")
+        good, red = self.lane("good"), self.lane("red")
+        self.assertEqual(self.calls(), [f"up good --path {good}", f"up red --path {red}"])
+        train = self.pl("train")
+        self.assertIn("landed 1 lane(s)", train.stdout)
+        self.assertEqual(self.calls()[2:], ["down red", "down good"])
+        resumed = self.pl("resume", "red")
+        self.assertIn("stanchion ok", resumed.stdout)
+        self.assertEqual(self.calls()[4:], [f"up red --path {red}"])
+
+    def test_a_stanchion_section_alone_turns_it_on(self):
+        py = Path(sys.executable).as_posix()
+        self.configure(f"\n[stanchion]\ncommand = '\"{py}\" \"{self.fake.as_posix()}\"'\n")
+        self.lane("one")
+        self.assertEqual(self.calls()[0].split()[:2], ["up", "one"])
+
+    def test_off_by_default(self):
+        self.configure("")
+        self.lane("one")
+        self.assertEqual(self.calls(), [])
+
+    def test_missing_stanchion_is_one_line_and_the_lane_still_opens(self):
+        self.configure("env = \"stanchion\"\n\n[stanchion]\ncommand = \"stanchion-not-installed-here\"\n")
+        new = self.pl("new", "one")
+        self.assertEqual(new.returncode, 0, new.stderr)
+        notices = [l for l in new.stdout.splitlines() if "not on PATH" in l]
+        self.assertEqual(len(notices), 1)
+        self.assertTrue((self.tmp / "app-lanes" / "one").is_dir())
+
+    def test_a_failing_stanchion_does_not_stop_the_lane(self):
+        failing = self.tmp / "failing_stanchion.py"
+        failing.write_text("import sys\nprint('psql failed', file=sys.stderr)\nsys.exit(2)\n")
+        py = Path(sys.executable).as_posix()
+        self.configure(f"env = \"stanchion\"\n\n[stanchion]\ncommand = '\"{py}\" \"{failing.as_posix()}\"'\n")
+        new = self.pl("new", "one")
+        self.assertEqual(new.returncode, 0, new.stderr)
+        self.assertIn("stanchion up one failed", new.stdout)
+        self.assertIn("psql failed", new.stdout)
+
+
 class OverlapTest(unittest.TestCase):
     def test_overlaps(self):
         self.assertTrue(paths_overlap("src/", "src/app.py"))

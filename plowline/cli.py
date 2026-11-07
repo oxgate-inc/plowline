@@ -37,6 +37,7 @@ DEFAULTS = {
     "agent": "claude",
     "land": "push",
     "on_land": "",
+    "env": "",
     "gh": "gh",
 }
 LANE_NAME = re.compile(r"^[a-z0-9][a-z0-9._-]{0,62}$")
@@ -127,13 +128,16 @@ class Yard:
         self.lanes_dir = self.state_dir / "lanes"
         self.pr_file = self.state_dir / "train-pr.json"
         self.cfg = dict(DEFAULTS)
+        self.stanchion: dict | None = None  # the [stanchion] table: lane environments through Stanchion
         cfg_file = self.root / CONFIG_NAME
         if cfg_file.exists():
             with cfg_file.open("rb") as f:
                 try:
-                    self.cfg.update(tomllib.load(f).get("plowline", {}))
+                    data = tomllib.load(f)
                 except tomllib.TOMLDecodeError as e:
                     raise YardError(f"{cfg_file}: {e}")
+            self.cfg.update(data.get("plowline", {}))
+            self.stanchion = data.get("stanchion")
 
     # --- state -----------------------------------------------------------
     def lane_file(self, name: str) -> Path:
@@ -223,6 +227,26 @@ class Yard:
         ok, out = shell(cmd, self.root, env)
         print(f"on_land: {'ok' if ok else 'FAILED (the lanes stay landed)'}" + (f"\n{tail(out)}" if out else ""))
         return ok
+
+    def lane_env(self, verb: str, lane: Lane) -> None:
+        """Optional Stanchion hook: `stanchion up` gives a lane its own ports and database,
+        `stanchion down` frees them. Never stops Plowline: a missing or failing Stanchion is
+        reported and the lane carries on."""
+        if self.cfg["env"] != "stanchion" and self.stanchion is None:
+            return
+        argv = shlex.split(str((self.stanchion or {}).get("command", "stanchion")))
+        exe = shutil.which(argv[0]) if argv else None
+        if not exe:
+            print(f"stanchion: {argv[0] if argv else 'stanchion'} is not on PATH, so lane {lane.name} shares "
+                  "your ports and database (pipx install git+https://github.com/oxgate-inc/stanchion)")
+            return
+        args = [exe, *argv[1:], verb, lane.name] + (["--path", lane.worktree] if verb == "up" else [])
+        p = subprocess.run(args, cwd=self.root, capture_output=True, text=True)
+        out = (p.stdout + p.stderr).strip()
+        if p.returncode != 0:
+            print(f"stanchion {verb} {lane.name} failed (the lane carries on):\n{tail(out)}")
+        elif out:
+            print(out)
 
     def worktree_dir(self, name: str) -> Path:
         base = Path(self.cfg["worktrees"].format(repo=self.root.name))
@@ -410,6 +434,7 @@ def cmd_new(y: Yard, a) -> int:
     lane = Lane(name=name, branch=branch, worktree=str(wt), base=base, paths=a.paths or [], brief=brief)
     y.save(lane)
     print(f"lane {name}: {wt} on {branch} from {base_ref} {base[:9]}")
+    y.lane_env("up", lane)
     for other, p, q in y.overlaps(lane):
         print(f"  overlap: {p} touches {q} in lane {other} (allowed; the train settles it)")
     return open_lane(y, lane, print_only=False) if a.open else 0
@@ -516,6 +541,7 @@ def bounce(y: Yard, lane: Lane, note: str) -> None:
     lane.state, lane.note = "bounced", note
     y.save(lane)
     print(f"bounced {lane.name}: {note.splitlines()[0]}")
+    y.lane_env("down", lane)
 
 
 def settle_pr(y: Yard) -> bool:
@@ -533,6 +559,7 @@ def settle_pr(y: Yard) -> bool:
         for lane in lanes:
             lane.state, lane.note = "landed", f"landed in {commit} via {pr['url']}"
             y.save(lane)
+            y.lane_env("down", lane)
         print(f"train PR merged: landed {len(lanes)} lane(s) at {commit[:9]}")
         y.after_land(lanes, commit, pr["url"])
     else:
@@ -620,6 +647,7 @@ def cmd_train(y: Yard, a) -> int:
             for lane, _ in merged:
                 lane.state, lane.note = "landed", f"landed in {head}"
                 y.save(lane)
+                y.lane_env("down", lane)
             print(f"landed {len(merged)} lane(s) on {base_ref} at {head[:9]}")
             hook_ok = y.after_land([l for l, _ in merged], head)
             return 1 if bounced or not hook_ok else 0
@@ -656,6 +684,7 @@ def cmd_resume(y: Yard, a) -> int:
         raise YardError(f"lane {lane.name} is {lane.state}, not bounced")
     lane.state = "active"
     y.save(lane)
+    y.lane_env("up", lane)
     trunk = y.trunk_ref(fetch=True)
     print(f"lane {lane.name} is active again in {lane.worktree}\n")
     print(lane.note.strip())

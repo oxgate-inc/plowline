@@ -110,6 +110,7 @@ agent = "claude"                 # what `pl open` starts in a lane: "codex", "ge
 land = "push"                    # "push" to the trunk, or "pr": open one pull request per train
 on_land = ""                     # optional: runs after each landing (deploy, tag, notify)
 worktrees = "../{repo}-lanes"    # where lane worktrees live
+env = ""                         # "stanchion": give each lane its own ports and database
 ```
 
 Leave `remote` empty for **local-only mode**: lanes branch from your local trunk,
@@ -149,6 +150,25 @@ or post a message. If it fails, the train reports it and the lanes stay landed.
 ```toml
 on_land = "./scripts/deploy-staging.sh"
 ```
+
+### Lane environments
+
+Worktrees separate the code, not the runtime: two lanes still share your dev
+server's port and your database. [Stanchion](https://github.com/oxgate-inc/stanchion)
+gives each lane its own block of ports, its own copy of your database and an
+env file in its worktree. Install it and turn it on:
+
+```toml
+[plowline]
+env = "stanchion"
+```
+
+`pl new` then runs `stanchion up <lane> --path <worktree>`, `pl resume` runs it
+again, and a lane that lands or is bounced gets `stanchion down <lane>`. Stanchion's
+own `stanchion.toml` says which database to copy and which variables to write. A
+`[stanchion]` table in `plowline.toml` also turns it on, and its `command` key sets
+how to run Stanchion (default `stanchion`). If Stanchion is not on PATH, Plowline prints
+one line and the lane opens anyway.
 
 ### How a train decides
 
