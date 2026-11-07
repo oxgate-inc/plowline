@@ -110,7 +110,7 @@ agent = "claude"                 # what `pl open` starts in a lane: "codex", "ge
 land = "push"                    # "push" to the trunk, or "pr": open one pull request per train
 on_land = ""                     # optional: runs after each landing (deploy, tag, notify)
 worktrees = "../{repo}-lanes"    # where lane worktrees live
-env = ""                         # "stanchion": give each lane its own ports and database
+env = ""                         # "stanchion" gives each lane its own database and ports; "off" turns it off
 ```
 
 Leave `remote` empty for **local-only mode**: lanes branch from your local trunk,
@@ -164,11 +164,25 @@ env = "stanchion"
 ```
 
 `pl new` then runs `stanchion up <lane> --path <worktree>`, `pl resume` runs it
-again, and a lane that lands or is bounced gets `stanchion down <lane>`. Stanchion's
-own `stanchion.toml` says which database to copy and which variables to write. A
-`[stanchion]` table in `plowline.toml` also turns it on, and its `command` key sets
-how to run Stanchion (default `stanchion`). If Stanchion is not on PATH, Plowline prints
-one line and the lane opens anyway.
+again, and a lane that lands or is bounced gets `stanchion down <lane>`. A bounce
+drops the lane's database, so a resumed lane starts from a fresh copy of the
+template. Stanchion's own `stanchion.toml` says which database to copy and which
+variables to write.
+
+A `[stanchion]` table in `plowline.toml` also turns it on, and `env = "off"` turns
+it off even when the table is there:
+
+```toml
+[stanchion]
+command = "stanchion"   # how to run it; on Windows a path such as 'C:\Tools\stanchion.exe' works
+timeout = 300           # seconds Plowline waits for each up or down
+```
+
+If Stanchion is not on PATH, Plowline prints one line and the lane opens anyway.
+A failed or timed-out `up` or `down` is printed and the lane carries on. A failed
+`down` leaves that lane's database and ports behind, and `pl clean` does not retry
+it: run `stanchion down <lane>`, or `stanchion gc` once `pl clean` has removed the
+worktree.
 
 ### How a train decides
 

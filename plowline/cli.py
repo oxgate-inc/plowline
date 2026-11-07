@@ -43,6 +43,7 @@ DEFAULTS = {
 LANE_NAME = re.compile(r"^[a-z0-9][a-z0-9._-]{0,62}$")
 DIFF_LIMIT = 200_000
 LOCK_STALE_SECONDS = 2 * 60 * 60
+STANCHION_TIMEOUT = 300  # seconds; `stanchion up` copies a database and may run a setup hook
 LANE_PROMPT = ("You are working in the Plowline lane {name}. Run pl show {name} to read your brief, "
                "and follow the lane rules in CLAUDE.md or AGENTS.md. When your work is committed and the tests "
                "pass, run pl done {name}. If it answers NO-GO, fix the findings and run it again.")
@@ -90,6 +91,13 @@ def shell(cmd: str, cwd: Path, env: dict | None = None) -> tuple[bool, str]:
     p = subprocess.run(cmd, cwd=cwd, shell=True, capture_output=True, text=True,
                        env={**os.environ, **(env or {})})
     return p.returncode == 0, (p.stdout + p.stderr).strip()
+
+
+def command_argv(cmd: str) -> list[str]:
+    """Split a configured command. On Windows, backslashes in paths are kept and quotes only group."""
+    if os.name != "nt":
+        return shlex.split(cmd)
+    return [a[1:-1] if len(a) > 1 and a[0] == a[-1] == '"' else a for a in shlex.split(cmd, posix=False)]
 
 
 def tail(text: str, lines: int = 20) -> str:
@@ -232,19 +240,35 @@ class Yard:
         """Optional Stanchion hook: `stanchion up` gives a lane its own ports and database,
         `stanchion down` frees them. Never stops Plowline: a missing or failing Stanchion is
         reported and the lane carries on."""
-        if self.cfg["env"] != "stanchion" and self.stanchion is None:
+        env = str(self.cfg["env"])
+        if env not in ("", "stanchion", "off"):
+            print(f"plowline.toml: env = {env!r} is not known (use \"stanchion\" or \"off\"), so it is ignored")
+        if env == "off" or (env != "stanchion" and self.stanchion is None):
             return
-        argv = shlex.split(str((self.stanchion or {}).get("command", "stanchion")))
+        table = self.stanchion or {}
+        argv = command_argv(str(table.get("command", "stanchion")))
         exe = shutil.which(argv[0]) if argv else None
         if not exe:
             print(f"stanchion: {argv[0] if argv else 'stanchion'} is not on PATH, so lane {lane.name} shares "
                   "your ports and database (pipx install git+https://github.com/oxgate-inc/stanchion)")
             return
         args = [exe, *argv[1:], verb, lane.name] + (["--path", lane.worktree] if verb == "up" else [])
-        p = subprocess.run(args, cwd=self.root, capture_output=True, text=True)
-        out = (p.stdout + p.stderr).strip()
-        if p.returncode != 0:
-            print(f"stanchion {verb} {lane.name} failed (the lane carries on):\n{tail(out)}")
+        timeout = table.get("timeout", STANCHION_TIMEOUT)
+        # Output goes to a file, not a pipe: after a timeout a grandchild (a launcher's Python) could
+        # hold a pipe open and keep us waiting.
+        with tempfile.TemporaryFile() as f:
+            try:
+                p = subprocess.run(args, cwd=self.root, stdout=f, stderr=subprocess.STDOUT, timeout=timeout)
+                failed = f"exit code {p.returncode}" if p.returncode != 0 else ""
+            except subprocess.TimeoutExpired:
+                failed = f"timed out after {timeout} seconds"
+            except OSError as e:
+                failed = str(e)
+            f.seek(0)
+            out = f.read().decode("utf-8", "replace").strip()
+        if failed:
+            print(f"stanchion {verb} {lane.name} failed (the lane carries on): {failed}"
+                  + (f"\n{tail(out)}" if out else ""))
         elif out:
             print(out)
 

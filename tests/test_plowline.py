@@ -1,3 +1,4 @@
+import os
 import shutil
 import sys
 import unittest
@@ -230,6 +231,47 @@ class LandModesTest(unittest.TestCase):
         self.pl("train")
         self.assertEqual(self.state("two"), "bounced")
 
+    def test_pr_mode_frees_lane_environments_on_merge_and_on_a_closed_pr(self):
+        import json
+        gh = self.tmp / "fake_gh.py"
+        gh.write_text(
+            "import pathlib, sys\n"
+            f"d = pathlib.Path({str(self.tmp)!r})\n"
+            "if sys.argv[1:3] == ['pr', 'create']:\n"
+            "    sys.stdin.read()\n"
+            "    print('https://example.test/pr/1')\n"
+            "elif sys.argv[1:3] == ['pr', 'view']:\n"
+            "    print((d / 'pr-state.json').read_text())\n")
+        log = self.tmp / "stanchion.log"
+        fake = self.tmp / "fake_stanchion.py"
+        fake.write_text(f"import sys\nwith open({str(log)!r}, 'a') as f:\n"
+                        "    f.write(' '.join(sys.argv[1:3]) + '\\n')\n")
+        py = Path(sys.executable).as_posix()
+        self.configure(f"land = \"pr\"\ngh = '\"{py}\" \"{gh.as_posix()}\"'\n\n"
+                       f"[stanchion]\ncommand = '\"{py}\" \"{fake.as_posix()}\"'\n")
+        pr_state = self.tmp / "pr-state.json"
+        calls = lambda: log.read_text().splitlines()
+
+        self.lane("one")
+        self.pl("train")
+        pr_state.write_text(json.dumps({"state": "OPEN", "mergeCommit": None}))
+        self.pl("train")
+        self.assertEqual(calls(), ["up one"])  # proposed and waiting: the lane keeps its environment
+
+        branch = self.run_("git", "ls-remote", "--heads", "origin", "plowline/train-*").stdout.split()[1]
+        self.run_("git", "push", "-q", "origin", f"{branch}:refs/heads/main")
+        merged = self.run_("git", "rev-parse", branch).stdout.strip()
+        pr_state.write_text(json.dumps({"state": "MERGED", "mergeCommit": {"oid": merged}}))
+        self.assertIn("train PR merged", self.pl("train").stdout)
+        self.assertEqual(calls()[1:], ["down one"])
+
+        self.lane("two")
+        self.pl("train")
+        pr_state.write_text(json.dumps({"state": "CLOSED", "mergeCommit": None}))
+        self.pl("train")
+        self.assertEqual(self.state("two"), "bounced")
+        self.assertEqual(calls()[2:], ["up two", "down two"])
+
 
 class StanchionHookTest(unittest.TestCase):
     """With env = "stanchion", lanes get `stanchion up` when they open or resume and `stanchion down` when they land or bounce."""
@@ -312,6 +354,84 @@ class StanchionHookTest(unittest.TestCase):
         self.assertEqual(new.returncode, 0, new.stderr)
         self.assertIn("stanchion up one failed", new.stdout)
         self.assertIn("psql failed", new.stdout)
+
+    def test_a_stanchion_that_hangs_times_out_and_the_lane_still_opens(self):
+        import time
+        slow = self.tmp / "slow_stanchion.py"
+        slow.write_text("import time\ntime.sleep(30)\n")
+        py = Path(sys.executable).as_posix()
+        self.configure(f"\n[stanchion]\ncommand = '\"{py}\" \"{slow.as_posix()}\"'\ntimeout = 1\n")
+        started = time.monotonic()
+        new = self.pl("new", "one")
+        self.assertLess(time.monotonic() - started, 20)
+        self.assertEqual(new.returncode, 0, new.stderr)
+        self.assertIn("stanchion up one failed (the lane carries on)", new.stdout)
+        self.assertIn("timed out after 1 seconds", new.stdout)
+        self.assertTrue((self.tmp / "app-lanes" / "one").is_dir())
+
+    def test_env_off_wins_over_a_stanchion_table(self):
+        py = Path(sys.executable).as_posix()
+        self.configure(f"env = \"off\"\n\n[stanchion]\ncommand = '\"{py}\" \"{self.fake.as_posix()}\"'\n")
+        new = self.pl("new", "one")
+        self.assertEqual(new.returncode, 0, new.stderr)
+        self.assertEqual(self.calls(), [])
+        self.assertNotIn("stanchion ok", new.stdout)
+        self.assertNotIn("not known", new.stdout)
+
+    def test_an_unknown_env_value_is_reported(self):
+        self.configure("env = \"stanchoin\"\n")
+        new = self.pl("new", "one")
+        self.assertEqual(new.returncode, 0, new.stderr)
+        self.assertIn("env = 'stanchoin' is not known", new.stdout)
+        self.assertEqual(self.calls(), [])
+
+    @unittest.skipUnless(os.name == "nt", "Windows paths")
+    def test_windows_paths_to_an_exe_and_a_cmd_shim(self):
+        shim = self.tmp / "bin dir" / "stanchion.cmd"
+        shim.parent.mkdir()
+        shim.write_text(f'@"{sys.executable}" "{self.fake}" %*\r\n')
+        # TOML literal strings keep backslashes exactly as a Windows user types them
+        self.configure(f"\n[stanchion]\ncommand = '{sys.executable} \"{self.fake}\"'\n")
+        self.assertEqual(self.pl("new", "one").returncode, 0)
+        self.run_("git", "rm", "-q", "plowline.toml")
+        self.configure(f"\n[stanchion]\ncommand = '\"{shim}\"'\n")
+        two = self.pl("new", "two")
+        self.assertEqual(two.returncode, 0, two.stderr)
+        self.assertNotIn("not on PATH", two.stdout)
+        self.assertEqual([c.split()[:2] for c in self.calls()], [["up", "one"], ["up", "two"]])
+
+    def test_lane_env_reports_an_os_error_and_carries_on(self):
+        import io
+        from contextlib import redirect_stdout
+        from unittest import mock
+        from plowline import cli
+        self.configure(f"\n[stanchion]\ncommand = '\"{Path(sys.executable).as_posix()}\"'\n")
+        y = cli.Yard(self.app)
+        lane = cli.Lane(name="one", branch="lane/one", worktree=str(self.app), base="main")
+        out = io.StringIO()
+        with mock.patch.object(cli.subprocess, "run", side_effect=OSError("exec format error")), redirect_stdout(out):
+            y.lane_env("up", lane)
+        self.assertIn("stanchion up one failed (the lane carries on)", out.getvalue())
+        self.assertIn("exec format error", out.getvalue())
+
+
+class CommandArgvTest(unittest.TestCase):
+    """A Windows path in `command` keeps its backslashes; POSIX quoting still works elsewhere."""
+
+    def test_windows_backslashes_survive(self):
+        from unittest import mock
+        from plowline import cli
+        with mock.patch.object(cli.os, "name", "nt"):
+            self.assertEqual(cli.command_argv(r"C:\Tools\stanchion.exe --quiet"),
+                             [r"C:\Tools\stanchion.exe", "--quiet"])
+            self.assertEqual(cli.command_argv(r'"C:\Program Files\pipx\stanchion.cmd" "C:\a b\x.py"'),
+                             [r"C:\Program Files\pipx\stanchion.cmd", r"C:\a b\x.py"])
+
+    def test_posix_quoting(self):
+        from unittest import mock
+        from plowline import cli
+        with mock.patch.object(cli.os, "name", "posix"):
+            self.assertEqual(cli.command_argv("'/opt/my tools/stanchion' -v"), ["/opt/my tools/stanchion", "-v"])
 
 
 class OverlapTest(unittest.TestCase):

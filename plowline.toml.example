@@ -7,4 +7,4 @@ regenerate = ""                  # optional: rebuild generated files on the merg
 land = "push"                    # "push" to the trunk, or "pr": open one pull request per train
 on_land = ""                     # optional: runs after each landing (deploy, tag, notify)
 worktrees = "../{repo}-lanes"    # where lane worktrees live
-env = ""                         # "stanchion": give each lane its own ports and database
+env = ""                         # "stanchion" gives each lane its own database and ports; "off" turns it off
