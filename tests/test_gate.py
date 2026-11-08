@@ -94,6 +94,12 @@ class RunGateTest(unittest.TestCase):
             self.assertIn("detail", result.output)
             self.assertEqual((self.tmp / ("after-" + status)).exists(), status == "pass")
 
+    def test_an_unknown_builtin_status_is_unavailable_not_red(self):
+        with mock.patch.dict(gate.BUILTIN_GATES, {"fake": lambda ctx: gate.StepResult("maybe", "?", "FAKE: ?")}):
+            result = gate.run_gate(["builtin:fake"], self.ctx)
+        self.assertEqual(result.status, "unavailable")
+        self.assertEqual(result.line, "GATE: UNAVAILABLE at step 1/1 `builtin:fake`: unknown status 'maybe': FAKE: ?")
+
     def test_a_crashing_builtin_is_unavailable_not_red(self):
         def crash(ctx):
             raise RuntimeError("boom")

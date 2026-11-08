@@ -209,15 +209,27 @@ are matched by extension:
 | [mutmut](https://mutmut.readthedocs.io/) 3 | Python | `pip install mutmut` (Linux, macOS, or WSL on Windows) | runs only the changed functions' mutants (`mutmut run "<module>.x_<function>__mutmut_*"`); Plowline keeps the ones on changed lines |
 | [StrykerJS](https://stryker-mutator.io/docs/stryker-js/introduction/) | JavaScript, TypeScript | `npm install --save-dev @stryker-mutator/core` and your test runner's plugin | `--mutate "src/x.ts:5-7,..."`: the changed line ranges |
 | [Stryker.NET](https://stryker-mutator.io/docs/stryker-net/introduction/) | C# | `dotnet tool install dotnet-stryker` | `--since:<base>`: the changed files; Plowline keeps the survivors on changed lines |
-| [cargo-mutants](https://mutants.rs/) | Rust | `cargo install --locked cargo-mutants` | `--in-diff <the train's diff>` |
+| [cargo-mutants](https://mutants.rs/) | Rust | `cargo install --locked cargo-mutants` | `--in-diff <the train's diff>`; Plowline reads `outcomes.json` |
 | [Gremlins](https://gremlins.dev/) | Go | `go install github.com/go-gremlins/gremlins/cmd/gremlins@latest` | `--diff <base>`; Plowline keeps the survivors on changed lines |
 
 Each engine reads its own configuration as usual (`[tool.mutmut]` in
 `pyproject.toml`, `stryker.config.json`, `stryker-config.json`,
-`.cargo/mutants.toml`, `.gremlins.yaml`). Test files (`test_*.py`, `*_test.*`,
-`*.test.*`, `*.spec.*`, anything under `tests/`, `test/` or `__tests__/`),
-`generated` files and `skip` globs are never mutated. For any other language,
-or to replace a built-in engine, name a command for the extension:
+`.cargo/mutants.toml`, `.gremlins.yaml`). Test files (`test_*.py`, `tests.py`,
+`*_tests.py`, `conftest.py`, `*_test.*`, `*.test.*`, `*.spec.*`, `*.cy.*`,
+`*Tests.cs`, `*Test.cs`, `*Spec.cs`, anything under a `tests/`, `test/`,
+`__tests__/`, `e2e/` or `*.Tests/` folder), `generated` files and `skip` globs
+are never mutated; add other test layouts to `skip`.
+
+A mutant counts against a lane when the lines it changed overlap the lane's
+changed lines: its whole span where the engine reports one (a "replace this
+function's body" mutant covers the body), its line where the engine gives only
+a line. A changed file that the engine's report does not mention at all is
+UNAVAILABLE, never a pass: it usually means a path or module name did not
+match. A file the report covers but with no mutant on its changed lines (a
+comment, a blank line) passes and is named in the report.
+
+For any other language, or to replace a built-in engine, name a command for the
+extension:
 
 ```toml
 [mutants]
@@ -232,16 +244,31 @@ command = "python tools/mutate_kotlin.py {ranges}"
 The command runs at the root of the merged tree with `{files}` (the changed
 files), `{ranges}` (`file:a-b` for each changed range), `{base}`, `{head}` and
 `{diff}` (a file holding the train's diff) filled in; write them bare, they
-arrive quoted. Exit 0 means no survivors and exit 1 means survivors: its output
-is the report, and lines like `path:line what` are listed as survivors. Any
-other exit code, or a command that is not found, is UNAVAILABLE.
+arrive quoted. The contract:
+
+- exit 0: no survivors;
+- exit 1: survivors, and the command prints one line per survivor,
+  `path:line what was mutated` (`path` relative to the repository root). Only
+  lines on changed lines count;
+- exit 1 with no such line, any other exit code, or a command that is not
+  found: UNAVAILABLE. A crash is never read as survivors.
 
 `pl check` runs the same check in your worktree, with no lane and no train: on
 `HEAD` (or `pl check <ref>`), against the merge-base with the trunk (or
 `--base <ref>`). It exits 0 on PASS, 1 on FAIL and 2 when it could not run.
-`pl check --explain` prints the files and line ranges it would mutate and the
-exact engine commands, and runs nothing. When the gate has `builtin:mutants`,
-`pl new --brief` asks the lane's agent to run `pl check` before `pl done`.
+It refuses a worktree with uncommitted changes, because the engines would test
+code the line numbers don't describe; `pl check --dirty` checks the working
+tree instead, diffing it (tracked files) against the base. `pl check --explain`
+prints the files and line ranges it would mutate and the exact engine commands,
+and runs nothing. On the trunk itself it says `nothing to mutate`. When the
+gate has `builtin:mutants`, `pl new --brief` asks the lane's agent to run
+`pl check` before `pl done`.
+
+A run leaves the tree as it found it: an engine's output folder that was
+already there (`mutants/`, `.stryker-tmp/`, `reports/mutation/mutation.json`)
+is moved aside for the run and put back, what the engine wrote is removed, and
+a tracked file it changed is checked out again. Anything it could not undo is
+named at the end of the report.
 
 Limits:
 
@@ -251,10 +278,25 @@ Limits:
   when the lane weakened the tests that cover it.
 - The `budget` covers all engines in one run, and every train, and each half of
   a bisection, runs it again. Over budget, the engine and everything it started
-  are stopped and the result is UNAVAILABLE: a timeout stops the train, it never
-  passes it and never bounces a lane. Raise `budget` or narrow it with `skip`.
-- mutmut mutates function bodies only, and does not run on Windows outside WSL.
-  For Python, the killed count is per changed function, not per line.
+  are stopped and the step is UNAVAILABLE: a timeout by itself never passes the
+  train and never bounces a lane. The one exception: survivors an earlier
+  engine already proved in the same run still make it FAIL. Raise `budget` or
+  narrow it with `skip`.
+- Only languages with an engine are checked. A change only to other files
+  (`.java`, `.rb`, `.kt` with no `[mutants.engines]` entry), or only to tests,
+  passes as `MUTANTS: nothing to mutate`, with the files left out counted on
+  that line; in a run that does mutate something, they are listed under
+  "not mutated".
+- mutmut mutates function bodies only: a change only to module-level Python
+  code has nothing to mutate. It does not run on Windows outside WSL. For
+  Python, the killed count is per changed function, not per line. A survivor
+  whose code appears more than once in its function is placed on the
+  function's first line.
+- Gremlins reports file names relative to the Go module. When two changed files
+  end in the same name (`a/pkg/x.go`, `b/pkg/x.go`), the mutant cannot be
+  placed and the step is UNAVAILABLE.
+- A production package that is literally named `test`, `tests` or `e2e` is
+  treated as tests and never mutated.
 
 ### Review
 

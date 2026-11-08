@@ -146,13 +146,17 @@ def parse_diff(text: str) -> list[FileScope]:
     new lines, or a deleted file) add nothing; a renamed file is listed under its new name."""
     files: dict[str, list[tuple[int, int]]] = {}
     current: str | None = None
-    for line in text.splitlines():
+    header = False  # between `diff --git` and the file's first hunk: the only place `+++ ` names a file
+    for line in text.split("\n"):
         if line.startswith("diff --git "):
-            current = None
-        elif line.startswith("+++ "):
-            target = _unquote(line[4:].rstrip("\t"))
+            current, header = None, True
+        elif header and line.startswith("+++ "):
+            target = _unquote(line[4:].rstrip("\t\r"))
             current = None if target == "/dev/null" else target.removeprefix("b/")
-        elif current and line.startswith("@@"):
+        elif line.startswith("@@"):
+            header = False
+            if not current:
+                continue
             m = HUNK.match(line)
             if not m:
                 continue
@@ -171,11 +175,15 @@ def parse_diff(text: str) -> list[FileScope]:
     return out
 
 
-TEST_NAMES = ("test_*.py", "*_test.*", "*.test.*", "*.spec.*", "*Tests.cs", "*Test.cs")
-TEST_DIRS = {"tests", "test", "__tests__"}
+TEST_NAMES = ("test_*.py", "*_test.*", "tests.py", "*_tests.py", "conftest.py", "*.test.*", "*.spec.*", "*.cy.*",
+              "*Tests.cs", "*Test.cs", "*Spec.cs")
+# Any folder with one of these names holds tests. A production package named `test` or `tests` is skipped too
+# (the README says so under Limits).
+TEST_DIRS = {"tests", "test", "__tests__", "e2e"}
 
 
 def is_test_file(path: str) -> bool:
+    """Test code is never mutated: its mutants would only test the tests."""
     parts = path.replace("\\", "/").split("/")
     if any(p in TEST_DIRS or p.endswith((".Tests", ".Test")) for p in parts[:-1]):
         return True
@@ -211,8 +219,15 @@ class ScopeError(Exception):
     pass
 
 
+WORKTREE = ""  # as `head`: the working tree itself (pl check --dirty), not a commit
+
+
+def diff_args(base: str, head: str) -> list[str]:
+    return [base, head] if head != WORKTREE else [base]
+
+
 def diff_scope(tree: Path, base: str, head: str, cfg: Config) -> Scope:
-    text = git(tree, "diff", "-U0", "--no-color", "--no-ext-diff", "-M", base, head, "--")
+    text = git(tree, "diff", "-U0", "--no-color", "--no-ext-diff", "-M", *diff_args(base, head), "--")
     return filter_scope(parse_diff(text), cfg, base, head)
 
 
@@ -222,24 +237,33 @@ class BudgetExceeded(Exception):
 
 
 def quote(value: str) -> str:
-    """One argument for a shell command line: double quotes for cmd.exe, shlex quoting elsewhere."""
-    return f'"{value}"' if os.name == "nt" else shlex.quote(value)
+    """One argument for a shell command line: double quotes for cmd.exe, shlex quoting elsewhere. cmd.exe expands
+    %NAME% even inside quotes, so each % is written outside them, escaped: "a"^%"b"."""
+    if os.name != "nt":
+        return shlex.quote(value)
+    return '"' + value.replace('"', '\\"').replace("%", '"^%"') + '"'
 
 
-def kill_tree(p: subprocess.Popen) -> None:
-    """Stop an engine and everything it started (test runners, compilers, workers)."""
+def kill_tree(p: subprocess.Popen) -> str:
+    """Stop an engine and everything it started (test runners, compilers, workers). Returns "" or what failed."""
+    problem = ""
     if os.name == "nt":
-        subprocess.run(["taskkill", "/F", "/T", "/PID", str(p.pid)], capture_output=True)
+        k = subprocess.run(["taskkill", "/F", "/T", "/PID", str(p.pid)], capture_output=True, text=True,
+                           errors="replace")
+        if k.returncode != 0 and p.poll() is None:
+            problem = f"taskkill /T exited {k.returncode}: {(k.stderr or k.stdout).strip()}"
     else:
         import signal
         try:
             os.killpg(p.pid, signal.SIGKILL)
-        except OSError:
-            pass
+        except OSError as e:
+            if p.poll() is None:
+                problem = f"killpg failed: {e}"
     try:
         p.kill()
     except OSError:
         pass
+    return problem
 
 
 class Runner:
@@ -249,6 +273,7 @@ class Runner:
         self.budget = budget
         self.deadline = time.monotonic() + budget
         self.env = {**os.environ, **(env or {})}
+        self.warnings: list[str] = []
 
     def run(self, cmd: str, cwd: Path) -> tuple[int, str]:
         left = self.deadline - time.monotonic()
@@ -261,11 +286,13 @@ class Runner:
         try:
             out, _ = p.communicate(timeout=left)
         except subprocess.TimeoutExpired:
-            kill_tree(p)
+            problem = kill_tree(p)
             try:
                 p.communicate(timeout=10)
             except subprocess.TimeoutExpired:
-                pass
+                problem = problem or "a process it started still holds its output open"
+            if problem:
+                self.warnings.append(f"the engine may still be running ({problem}); stop it by hand: {cmd}")
             raise BudgetExceeded()
         except BaseException:  # Ctrl-C: the engine runs in its own group, so stop it here
             kill_tree(p)
@@ -289,13 +316,51 @@ class Survivor:
 
 
 @dataclass
+class Parsed:
+    """What a parser read from an engine's report, already limited to the changed lines."""
+    survivors: list[Survivor] = field(default_factory=list)
+    killed: int = 0
+    # repository path -> mutants judged on its changed lines, for every scoped file the report covers. A scoped file
+    # missing here was not covered at all (a path or naming mismatch), and that is never a pass.
+    evaluated: dict[str, int] = field(default_factory=dict)
+    unjudged: list[str] = field(default_factory=list)  # mutants on changed lines with a status we cannot judge
+
+    def count(self, path: str, n: int = 1) -> None:
+        self.evaluated[path] = self.evaluated.get(path, 0) + n
+
+
+@dataclass
 class Outcome:
     engine: str
     survivors: list[Survivor] = field(default_factory=list)
     killed: int = 0
     unavailable: str = ""  # why the engine could not give a verdict; "" when it ran
-    red: str = ""  # a generic engine said "survivors" (exit 1) without naming any: its output
     note: str = ""
+    evaluated: dict[str, int] | None = None  # see Parsed; None when the engine cannot say (a generic command)
+
+    @classmethod
+    def of(cls, engine: str, parsed: Parsed) -> "Outcome":
+        if parsed.unjudged:
+            more = f" and {len(parsed.unjudged) - 3} more" if len(parsed.unjudged) > 3 else ""
+            return cls(engine, unavailable=f"it could not judge {len(parsed.unjudged)} mutant(s) on changed lines "
+                                           f"({', '.join(parsed.unjudged[:3])}{more})")
+        return cls(engine, parsed.survivors, parsed.killed, evaluated=parsed.evaluated)
+
+
+def check_coverage(outcome: Outcome, files: list[FileScope]) -> Outcome:
+    """An engine that ran but whose report says nothing about a scoped file did not test it: UNAVAILABLE, not PASS.
+    A covered file with no mutant on its changed lines (a comment, a blank line) is named in a note."""
+    if outcome.unavailable or outcome.evaluated is None:
+        return outcome
+    missing = [f.path for f in files if f.path not in outcome.evaluated]
+    if missing:
+        return Outcome(outcome.engine, unavailable=f"its report has nothing for {', '.join(missing)}",
+                       note=outcome.note)
+    quiet = [f.path for f in files if outcome.evaluated[f.path] == 0]
+    if quiet:
+        outcome.note = "\n".join(filter(None, [outcome.note, f"{outcome.engine}: no mutant on the changed lines of "
+                                                             f"{', '.join(quiet)}"]))
+    return outcome
 
 
 @dataclass
@@ -404,9 +469,11 @@ MUTMUT_KEY = re.compile(r"\.x(?:_(?P<func>\w+?)|ǁ(?P<cls>\w+)ǁ(?P<meth>\w+?))_
 
 
 def mutmut_module(path: str) -> str:
-    """mutmut's module name for a file: path without .py, dots for slashes, a leading `src.` dropped."""
+    """mutmut's module name for a file: path without .py, dots for slashes, a leading `src.` dropped, and a
+    package's `__init__` left out (mutmut names `pkg/__init__.py` mutants `pkg.x_f__mutmut_1`)."""
     module = path[:-3].replace("/", ".") if path.endswith(".py") else path.replace("/", ".")
-    return module.removeprefix("src.")
+    module = module.removeprefix("src.")
+    return module.removesuffix(".__init__") if module.endswith(".__init__") else module
 
 
 def python_functions(source: str) -> list[tuple[str | None, str, int, int]] | None:
@@ -431,11 +498,17 @@ def python_functions(source: str) -> list[tuple[str | None, str, int, int]] | No
     return out
 
 
+def lines_of(text: str) -> list[str]:
+    """A file's lines as git counts them: split on newline only (a form feed or U+2028 is not a line end)."""
+    lines = text.replace("\r\n", "\n").split("\n")
+    return lines[:-1] if lines and lines[-1] == "" else lines
+
+
 def parse_mutmut_show(text: str) -> tuple[list[tuple[str, str]], list[str]]:
     """`mutmut show` prints a unified diff of one function: returns the old side as (" " or "-", line) and the
     added lines."""
     old, added, inside = [], [], False
-    for line in text.splitlines():
+    for line in lines_of(text):
         if line.startswith("@@"):
             inside = True
             continue
@@ -460,19 +533,18 @@ class Mutmut(Engine):
         return "" if shutil.which("mutmut") else "not found on PATH; install mutmut 3 (pip install mutmut)"
 
     @staticmethod
-    def targets(job: Job) -> list[str]:
+    def file_targets(path: str, ranges: FileScope, source: str) -> list[str]:
+        module = mutmut_module(path)
+        functions = python_functions(source)
+        if functions is None:
+            return [f"{module}.*"]
+        return [f"{module}.x_{name}__mutmut_*" if cls is None else f"{module}.x?{cls}?{name}__mutmut_*"
+                for cls, name, start, end in functions if ranges.touches(start, end)]
+
+    @classmethod
+    def targets(cls, job: Job) -> list[str]:
         """mutmut has no line or diff option, but it takes mutant names with globs: one glob per changed function."""
-        globs = []
-        for f in job.files:
-            module = mutmut_module(f.path)
-            functions = python_functions(job.sources.get(f.path, ""))
-            if functions is None:
-                globs.append(f"{module}.*")
-                continue
-            for cls, name, start, end in functions:
-                if f.touches(start, end):
-                    globs.append(f"{module}.x_{name}__mutmut_*" if cls is None else f"{module}.x?{cls}?{name}__mutmut_*")
-        return globs
+        return [g for f in job.files for g in cls.file_targets(f.path, f, job.sources.get(f.path, ""))]
 
     def command(self, job: Job) -> str:
         globs = self.targets(job)
@@ -480,25 +552,29 @@ class Mutmut(Engine):
 
     def execute(self, job: Job, runner: Runner) -> Outcome:
         if not self.targets(job):
-            return Outcome(self.name, note="mutmut: no changed function (mutmut mutates function bodies only)")
+            return Outcome(self.name, evaluated={f.path: 0 for f in job.files},
+                           note="mutmut: no changed function (mutmut mutates function bodies only)")
         return super().execute(job, runner)
 
     def collect(self, job, code, out, runner, started) -> Outcome:
-        metas = {}
+        if code != 0:
+            return self.no_report(code, out)
+        metas, stale = {}, []
         for f in job.files:
             meta = job.tree / "mutants" / (f.path + ".meta")
             if fresh(meta, started):
                 metas[f.path] = meta.read_text(encoding="utf-8")
-        if code != 0 or not metas:
-            return self.no_report(code, out)
+            elif self.file_targets(f.path, f, job.sources.get(f.path, "")):
+                stale.append(f.path)
+        if stale:
+            return Outcome(self.name, unavailable=f"no fresh results for {', '.join(stale)}", note=tail(out))
         globs = self.targets(job)
         shows = {}
         for key in self.survivor_keys(metas, globs):
             show_code, text = runner.run(f"mutmut show {quote(key)}", job.tree)
             if show_code == 0:
                 shows[key] = text
-        survivors, killed = self.parse(metas, shows, job.sources, job.files, globs)
-        return Outcome(self.name, survivors, killed)
+        return Outcome.of(self.name, self.parse(metas, shows, job.sources, job.files, globs))
 
     @staticmethod
     def statuses(metas: dict[str, str], globs: list[str]) -> dict[str, tuple[str, int | None]]:
@@ -516,64 +592,82 @@ class Mutmut(Engine):
 
     @classmethod
     def parse(cls, metas: dict[str, str], shows: dict[str, str], sources: dict[str, str], files: list[FileScope],
-              globs: list[str]) -> tuple[list[Survivor], int]:
+              globs: list[str]) -> Parsed:
         """Survivors on changed lines, and the mutants killed in the changed functions. Each survivor's line comes
-        from `mutmut show`: its diff is placed in the function, found in the source by name."""
-        scopes = {f.path: f for f in files}
-        statuses = cls.statuses(metas, globs)
-        killed = sum(1 for _, code in statuses.values() if code in MUTMUT_KILLED)
-        survivors = []
-        for key, (path, code) in sorted(statuses.items()):
-            if code not in MUTMUT_SURVIVED or path not in scopes:
+        from `mutmut show`: its diff is placed in the function, found in the source by name. A file counts as
+        covered when its results hold mutants of the changed functions (or it has no changed function)."""
+        parsed = Parsed()
+        for f in files:
+            if not cls.file_targets(f.path, f, sources.get(f.path, "")):
+                parsed.count(f.path, 0)
+        for key, (path, code) in sorted(cls.statuses(metas, globs).items()):
+            scope = next((f for f in files if f.path == path), None)
+            if scope is None:
                 continue
-            source = sources.get(path, "").splitlines()
+            parsed.count(path, 0)
+            if code in MUTMUT_KILLED:
+                parsed.killed += 1
+                parsed.count(path)
+                continue
+            if code not in MUTMUT_SURVIVED:
+                parsed.unjudged.append(f"{key.rsplit('.', 1)[-1]}: exit {code}")
+                continue
+            source = lines_of(sources.get(path, ""))
             m = MUTMUT_KEY.search(key)
             cls_name, func = (m.group("cls"), m.group("meth") or m.group("func")) if m else (None, "")
             span = next(((s, e) for c, n, s, e in python_functions("\n".join(source)) or []
                          if n == func and c == cls_name), (1, len(source)))
             old, added = parse_mutmut_show(shows.get(key, ""))
             lines = cls._place(source, span, old)
-            if lines is None:  # no usable diff: count it on the function if the function changed
-                if scopes[path].touches(*span):
-                    survivors.append(Survivor(path, span[0], f"mutant {key.rsplit('.', 1)[-1]}"))
+            if lines is None:  # no usable diff, or an ambiguous one: count it on the function if the function changed
+                if scope.touches(*span):
+                    parsed.survivors.append(Survivor(path, span[0], f"mutant {key.rsplit('.', 1)[-1]}"))
+                    parsed.count(path)
                 continue
-            at = scopes[path].first_touched(lines)
+            at = scope.first_touched(lines)
             if at is None:
                 continue
+            parsed.count(path)
             removed = " ".join(text.strip() for kind, text in old if kind == "-")
-            survivors.append(Survivor(path, at, describe_change(removed, " ".join(a.strip() for a in added))))
-        return survivors, killed
+            parsed.survivors.append(Survivor(path, at, describe_change(removed, " ".join(a.strip() for a in added))))
+        return parsed
 
     @staticmethod
     def _place(source: list[str], span: tuple[int, int], old: list[tuple[str, str]]) -> list[int] | None:
-        """The file lines a mutant changed: find the diff's old side inside the function (whitespace-insensitive,
-        since a method is shown dedented). The search starts a little above the function, because mutmut shows the
-        comments above a function as part of it."""
+        """The file lines a mutant changed: find the diff's old side in the file (whitespace-insensitive, since a
+        method is shown dedented). The search starts a little above the function, because mutmut shows the
+        comments above a function as part of it. One match inside the function wins; with several, or none, the
+        caller falls back to the function's span."""
         if not old:
             return None
         want = [t.strip() for _, t in old]
         start, end = span
-        for i in range(max(0, start - 1 - len(want)), min(end, len(source)) - len(want) + 1):
-            if all(source[i + k].strip() == want[k] for k in range(len(want))):
-                removed = [i + 1 + k for k, (kind, _) in enumerate(old) if kind == "-"]
-                return removed or [i + 1]
-        return None
+        matches = [i for i in range(max(0, start - 1 - len(want)), min(end, len(source)) - len(want) + 1)
+                   if all(source[i + k].strip() == want[k] for k in range(len(want)))]
+        inside = [i for i in matches if i >= start - 1] or matches
+        if len(inside) != 1:
+            return None
+        i = inside[0]
+        return [i + 1 + k for k, (kind, _) in enumerate(old) if kind == "-"] or [i + 1]
 
 
 # JavaScript and TypeScript: StrykerJS ----------------------------------------------------------------------------
 STRYKER_SURVIVED = {"Survived", "NoCoverage"}
 STRYKER_KILLED = {"Killed", "Timeout"}
+STRYKER_NOT_RUN = {"CompileError", "RuntimeError", "Ignored"}  # not viable, or excluded: neither kills nor survivors
 
 
-def parse_stryker_json(text: str, job: Job) -> tuple[list[Survivor], int]:
-    """A mutation-testing-elements report (StrykerJS and Stryker.NET): survivors on changed lines, kills there."""
+def parse_stryker_json(text: str, job: Job) -> Parsed:
+    """A mutation-testing-elements report (StrykerJS and Stryker.NET). A mutant counts when its span overlaps a
+    changed line."""
     report = json.loads(text)
-    survivors, killed = [], 0
+    parsed = Parsed()
     for key, entry in (report.get("files") or {}).items():
         scope = job.scope(job.rel(key))
         if scope is None:
             continue
-        source = (entry.get("source") or "").splitlines()
+        parsed.count(scope.path, 0)
+        source = lines_of(entry.get("source") or "")
         for mutant in entry.get("mutants") or []:
             loc = mutant.get("location") or {}
             start, end = loc.get("start") or {}, loc.get("end") or {}
@@ -581,12 +675,18 @@ def parse_stryker_json(text: str, job: Job) -> tuple[list[Survivor], int]:
             if not scope.touches(first, last):
                 continue
             status = mutant.get("status")
+            if status in STRYKER_NOT_RUN:
+                continue
             if status in STRYKER_KILLED:
-                killed += 1
+                parsed.killed += 1
             elif status in STRYKER_SURVIVED:
                 line = scope.first_touched(list(range(first, last + 1))) or first
-                survivors.append(Survivor(scope.path, line, _stryker_words(mutant, source, start, end)))
-    return survivors, killed
+                parsed.survivors.append(Survivor(scope.path, line, _stryker_words(mutant, source, start, end)))
+            else:
+                parsed.unjudged.append(f"{scope.path}:{first} {status}")
+                continue
+            parsed.count(scope.path)
+    return parsed
 
 
 def _stryker_words(mutant: dict, source: list[str], start: dict, end: dict) -> str:
@@ -621,8 +721,7 @@ class StrykerJS(Engine):
         report = job.tree / self.report
         if not fresh(report, started):
             return self.no_report(code, out)
-        survivors, killed = parse_stryker_json(report.read_text(encoding="utf-8"), job)
-        return Outcome(self.name, survivors, killed)
+        return Outcome.of(self.name, parse_stryker_json(report.read_text(encoding="utf-8"), job))
 
 
 # C#: Stryker.NET -------------------------------------------------------------------------------------------------
@@ -630,6 +729,7 @@ class StrykerNet(Engine):
     name = "Stryker.NET"
     exts = (".cs",)
     needs = "Stryker.NET (dotnet tool install dotnet-stryker)"
+    leftovers = ("StrykerOutput",)
 
     def available(self, tree: Path) -> str:
         if not shutil.which("dotnet"):
@@ -646,7 +746,7 @@ class StrykerNet(Engine):
     def command(self, job: Job) -> str:
         # Stryker.NET's mutate spans are character offsets, not lines: --since scopes it to the changed files,
         # and Plowline keeps the survivors on changed lines.
-        return f"dotnet stryker --since:{job.base} -r json -O {quote(str(self.out_dir(job)))}"
+        return f"dotnet stryker --since:{quote(job.base)} -r json -O {quote(str(self.out_dir(job)))}"
 
     def execute(self, job: Job, runner: Runner) -> Outcome:
         self.out_dir(job).mkdir(parents=True, exist_ok=True)  # Stryker.NET wants the output folder to exist
@@ -656,26 +756,45 @@ class StrykerNet(Engine):
         report = self.out_dir(job) / "reports" / "mutation-report.json"
         if not report.exists():
             return self.no_report(code, out)
-        survivors, killed = parse_stryker_json(report.read_text(encoding="utf-8"), job)
-        return Outcome(self.name, survivors, killed)
+        return Outcome.of(self.name, parse_stryker_json(report.read_text(encoding="utf-8"), job))
 
 
 # Rust: cargo-mutants ---------------------------------------------------------------------------------------------
-CARGO_LINE = re.compile(r"^(?P<path>[^:]+):(?P<line>\d+):(?P<col>\d+):\s*(?P<what>.*)$")
+CARGO_NAME = re.compile(r"^[^:]+:\d+:\d+:\s*")
 
 
-def parse_cargo_mutants(missed: str, caught: str, timeout: str, job: Job) -> tuple[list[Survivor], int]:
-    """cargo-mutants' missed.txt / caught.txt / timeout.txt: `src/lib.rs:5:9: replace is_even -> bool with true`."""
-    def entries(text: str):
-        for line in text.splitlines():
-            m = CARGO_LINE.match(line.strip())
-            if m:
-                scope = job.scope(m.group("path"))
-                if scope and scope.touches(int(m.group("line"))):
-                    yield scope.path, int(m.group("line")), m.group("what").strip()
-
-    survivors = [Survivor(p, n, w) for p, n, w in entries(missed)]
-    return survivors, sum(1 for _ in entries(caught)) + sum(1 for _ in entries(timeout))
+def parse_cargo_outcomes(text: str, job: Job) -> Parsed:
+    """cargo-mutants' mutants.out/outcomes.json. Each mutant has a span (a whole function body for "replace f with
+    x"), and counts when that span overlaps a changed line."""
+    parsed = Parsed()
+    for outcome in json.loads(text).get("outcomes") or []:
+        scenario = outcome.get("scenario")
+        mutant = scenario.get("Mutant") if isinstance(scenario, dict) else None
+        if not mutant:
+            continue  # the baseline
+        scope = job.scope(mutant.get("file", ""))
+        if scope is None:
+            continue
+        parsed.count(scope.path, 0)
+        span = mutant.get("span") or {}
+        first = int((span.get("start") or {}).get("line", 0))
+        last = int((span.get("end") or {}).get("line", first))
+        if not scope.touches(first, last):
+            continue
+        summary = outcome.get("summary")
+        what = CARGO_NAME.sub("", mutant.get("name", "")) or f"replace with {mutant.get('replacement', '?')}"
+        if summary == "Unviable":
+            continue
+        if summary in ("CaughtMutant", "Timeout"):
+            parsed.killed += 1
+        elif summary == "MissedMutant":
+            parsed.survivors.append(Survivor(scope.path, scope.first_touched(list(range(first, last + 1))) or first,
+                                             what))
+        else:
+            parsed.unjudged.append(f"{scope.path}:{first} {summary}")
+            continue
+        parsed.count(scope.path)
+    return parsed
 
 
 class CargoMutants(Engine):
@@ -692,23 +811,18 @@ class CargoMutants(Engine):
         return f"cargo mutants --in-diff {quote(str(job.diff_file))} --output {quote(str(job.work))}"
 
     def collect(self, job, code, out, runner, started) -> Outcome:
-        folder = job.work / "mutants.out"
+        report = job.work / "mutants.out" / "outcomes.json"
         if code == 4:
-            return Outcome(self.name, unavailable="the tests fail before any mutation (exit 4)",
-                           note=tail(out))
-        if code not in (0, 2, 3) or not folder.exists():
+            return Outcome(self.name, unavailable="the tests fail before any mutation (exit 4)", note=tail(out))
+        if code not in (0, 2, 3) or not report.exists():
             return self.no_report(code, out)
-
-        def read(name: str) -> str:
-            f = folder / name
-            return f.read_text(encoding="utf-8", errors="replace") if f.exists() else ""
-        survivors, killed = parse_cargo_mutants(read("missed.txt"), read("caught.txt"), read("timeout.txt"), job)
-        return Outcome(self.name, survivors, killed)
+        return Outcome.of(self.name, parse_cargo_outcomes(report.read_text(encoding="utf-8"), job))
 
 
 # Go: Gremlins ----------------------------------------------------------------------------------------------------
 GREMLINS_SURVIVED = {"LIVED", "NOT COVERED"}
 GREMLINS_KILLED = {"KILLED", "TIMED OUT"}
+GREMLINS_NOT_RUN = {"NOT VIABLE", "SKIPPED"}
 GREMLINS_WORDS = {
     "CONDITIONALS_BOUNDARY": "changed a comparison boundary (< to <=)",
     "CONDITIONALS_NEGATION": "negated a comparison (== to !=)",
@@ -724,26 +838,38 @@ GREMLINS_WORDS = {
 }
 
 
-def parse_gremlins(text: str, job: Job) -> tuple[list[Survivor], int]:
-    """Gremlins' -o JSON: files[].mutations[] with line, type and status."""
-    report = json.loads(text)
-    survivors, killed = [], 0
-    for entry in report.get("files") or []:
+def parse_gremlins(text: str, job: Job) -> Parsed:
+    """Gremlins' -o JSON: files[].mutations[] with a line, a type and a status. Gremlins gives one line per mutant,
+    which counts when it is a changed line. File names are module-relative: an exact match wins, then a single
+    changed file ending in that name; two candidates are ambiguous and cannot be judged."""
+    parsed = Parsed()
+    for entry in json.loads(text).get("files") or []:
         name = job.rel(entry.get("file_name", ""))
-        scope = job.scope(name) or next((f for f in job.files if f.path.endswith("/" + name)), None)
+        scope = job.scope(name)
+        if scope is None:
+            candidates = [f for f in job.files if f.path.endswith("/" + name)]
+            if len(candidates) > 1:
+                parsed.unjudged.append(f"{name} (matches {', '.join(f.path for f in candidates)})")
+                continue
+            scope = candidates[0] if candidates else None
         if scope is None:
             continue
+        parsed.count(scope.path, 0)
         for mutation in entry.get("mutations") or []:
             line = int(mutation.get("line", 0))
-            if not scope.touches(line):
-                continue
             status = mutation.get("status")
+            if not scope.touches(line) or status in GREMLINS_NOT_RUN:
+                continue
             if status in GREMLINS_KILLED:
-                killed += 1
+                parsed.killed += 1
             elif status in GREMLINS_SURVIVED:
                 kind = mutation.get("type", "")
-                survivors.append(Survivor(scope.path, line, GREMLINS_WORDS.get(kind, mutator_words(kind))))
-    return survivors, killed
+                parsed.survivors.append(Survivor(scope.path, line, GREMLINS_WORDS.get(kind, mutator_words(kind))))
+            else:
+                parsed.unjudged.append(f"{scope.path}:{line} {status}")
+                continue
+            parsed.count(scope.path)
+    return parsed
 
 
 class Gremlins(Engine):
@@ -756,14 +882,13 @@ class Gremlins(Engine):
             "not found on PATH; go install github.com/go-gremlins/gremlins/cmd/gremlins@latest"
 
     def command(self, job: Job) -> str:
-        return f"gremlins unleash --diff {job.base} -o {quote(str(job.work / 'gremlins.json'))}"
+        return f"gremlins unleash --diff {quote(job.base)} -o {quote(str(job.work / 'gremlins.json'))}"
 
     def collect(self, job, code, out, runner, started) -> Outcome:
         report = job.work / "gremlins.json"
         if not report.exists():
             return self.no_report(code, out)
-        survivors, killed = parse_gremlins(report.read_text(encoding="utf-8"), job)
-        return Outcome(self.name, survivors, killed)
+        return Outcome.of(self.name, parse_gremlins(report.read_text(encoding="utf-8"), job))
 
 
 # Any language: a configured command ------------------------------------------------------------------------------
@@ -771,8 +896,8 @@ GENERIC_LINE = re.compile(r"^\s*(?P<path>[^\s:][^:]*):(?P<line>\d+)(?::\d+)?[:\s
 
 
 class Generic(Engine):
-    """[mutants.engines.<ext>] command = "...": exit 0 = no survivors, exit 1 = survivors (its output is the report;
-    lines like `path:line what` are listed), anything else = unavailable."""
+    """[mutants.engines.<ext>] command = "...": exit 0 = no survivors; exit 1 = survivors, each printed as a line
+    `path:line what`; exit 1 with no such line on a changed line, any other exit, or not found = unavailable."""
     needs = "the command in [mutants.engines]"
 
     def __init__(self, ext: str, template: str):
@@ -787,7 +912,7 @@ class Generic(Engine):
         values = {
             "{files}": " ".join(quote(f.path) for f in job.files),
             "{ranges}": " ".join(quote(f"{f.path}:{a}-{b}") for f in job.files for a, b in f.ranges),
-            "{base}": job.base, "{head}": job.head, "{diff}": quote(str(job.diff_file)),
+            "{base}": quote(job.base), "{head}": quote(job.head or "WORKTREE"), "{diff}": quote(str(job.diff_file)),
         }
         cmd = self.template
         for key, value in values.items():
@@ -798,15 +923,17 @@ class Generic(Engine):
         if code == 0:
             return Outcome(self.name)
         if code != 1:
-            return Outcome(self.name, unavailable=f"exited {code} (0 = no survivors, 1 = survivors)",
-                           note=tail(out))
+            return Outcome(self.name, unavailable=f"exited {code} (0 = no survivors, 1 = survivors)", note=tail(out))
         survivors = parse_generic(out, job)
-        return Outcome(self.name, survivors, red="" if survivors else tail(out, 40) or "(no output)")
+        if not survivors:
+            return Outcome(self.name, unavailable="exited 1 but listed no survivor on a changed line (print "
+                                                  "`path:line what` for each)", note=tail(out))
+        return Outcome(self.name, survivors)
 
 
 def parse_generic(out: str, job: Job) -> list[Survivor]:
     survivors = []
-    for line in out.splitlines():
+    for line in lines_of(out):
         m = GENERIC_LINE.match(line)
         if m:
             scope = job.scope(m.group("path"))
@@ -871,88 +998,147 @@ def prepare(tree: Path, base: str, head: str, cfg: Config | None) -> tuple[Confi
 
 def write_job(tree: Path, scope: Scope, files: list[FileScope], work: Path, n: int) -> Job:
     diff_file = work / f"scope-{n}.diff"
-    diff_file.write_text(git(tree, "diff", "--no-color", "--no-ext-diff", "-M", scope.base, scope.head, "--",
-                             *[f.path for f in files]), encoding="utf-8")
+    diff_file.write_text(git(tree, "diff", "--no-color", "--no-ext-diff", "-M", *diff_args(scope.base, scope.head),
+                             "--", *[f.path for f in files]), encoding="utf-8")
     sources = {}
     for f in files:
         try:
-            sources[f.path] = git(tree, "show", f"{scope.head}:{f.path}")
-        except ScopeError:
+            sources[f.path] = ((tree / f.path).read_text(encoding="utf-8", errors="replace")
+                               if scope.head == WORKTREE else git(tree, "show", f"{scope.head}:{f.path}"))
+        except (ScopeError, OSError):
             sources[f.path] = ""
     return Job(tree, scope.base, scope.head, files, diff_file, work, sources)
 
 
-def _snapshot(tree: Path, paths: tuple[str, ...]) -> set[Path]:
-    """The leftover paths, and their parent folders, that exist before an engine runs."""
-    seen = set()
-    for rel in paths:
-        p = tree / rel
-        while p != tree and p != p.parent:
+def tracked_changes(tree: Path) -> set[str]:
+    """Tracked files whose working copy differs from the index."""
+    try:
+        return {p for p in git(tree, "diff", "--name-only", "-z").split("\0") if p}
+    except ScopeError:
+        return set()
+
+
+class TreeGuard:
+    """Leaves the tree as the engine found it, so `pl done` still sees a clean worktree and old results never enter
+    a report: the engine's output folders that already exist are moved aside first and put back afterwards, what
+    the engine wrote is removed, and a tracked file it changed is checked out again."""
+
+    def __init__(self, tree: Path, leftovers: tuple[str, ...]):
+        self.tree, self.leftovers = tree, leftovers
+        self.warnings: list[str] = []
+        self.moved: list[tuple[Path, Path]] = []
+        self.existing: set[Path] = set()
+
+    def __enter__(self) -> "TreeGuard":
+        self.dirty = tracked_changes(self.tree)
+        for rel in self.leftovers:
+            p = self.tree / rel
+            parent = p.parent
+            while parent != self.tree and parent != parent.parent:
+                if parent.exists():
+                    self.existing.add(parent)
+                parent = parent.parent
             if p.exists():
-                seen.add(p)
-            p = p.parent
-    return seen
+                aside = p.with_name(p.name + ".plowline-aside")
+                if aside.exists():
+                    self.warnings.append(f"{aside} is left from an earlier run; move it back to {p} by hand")
+                    continue
+                p.rename(aside)
+                self.moved.append((p, aside))
+        return self
+
+    def __exit__(self, *exc) -> None:
+        for rel in self.leftovers:
+            p = self.tree / rel
+            if p.is_dir():
+                shutil.rmtree(p, ignore_errors=True)
+            elif p.exists():
+                p.unlink(missing_ok=True)
+            if p.exists():
+                self.warnings.append(f"could not remove {p} (a file in it is still open); remove it before pl done")
+            parent = p.parent
+            while parent != self.tree and parent not in self.existing and parent.exists() \
+                    and not any(parent.iterdir()):
+                parent.rmdir()
+                parent = parent.parent
+        for p, aside in self.moved:
+            try:
+                p.parent.mkdir(parents=True, exist_ok=True)
+                aside.rename(p)
+            except OSError as e:
+                self.warnings.append(f"could not put {p} back (it is at {aside}): {e}")
+        changed = sorted(tracked_changes(self.tree) - self.dirty)
+        if changed:
+            try:
+                git(self.tree, "checkout", "--", *changed)
+                self.warnings.append(f"the engine changed tracked file(s) {', '.join(changed)}; checked them out again")
+            except ScopeError as e:
+                self.warnings.append(f"the engine changed tracked file(s) {', '.join(changed)}: {e}")
 
 
-def _clean(tree: Path, paths: tuple[str, ...], before: set[Path]) -> None:
-    """Remove what an engine wrote into the tree, so `pl done` still finds a clean worktree."""
-    for rel in paths:
-        p = tree / rel
-        if p in before or not p.exists():
-            continue
-        shutil.rmtree(p, ignore_errors=True) if p.is_dir() else p.unlink(missing_ok=True)
-        parent = p.parent
-        while parent != tree and parent not in before and parent.exists() and not any(parent.iterdir()):
-            parent.rmdir()
-            parent = parent.parent
+def skipped_summary(scope: Scope) -> str:
+    counts: dict[str, int] = {}
+    for _, why in scope.skipped:
+        counts[why] = counts.get(why, 0) + 1
+    return ", ".join(f"{n} {why}" for why, n in counts.items())
 
 
 def run(tree: Path, base: str, head: str, cfg: Config | None = None, env: dict | None = None) -> Result:
-    """Mutate the lines base..head added or changed, in `tree`, and judge the survivors."""
+    """Mutate the lines base..head added or changed, in `tree`, and judge the survivors. `head` WORKTREE ("") means
+    the working tree itself."""
     tree = Path(tree)
     try:
         cfg, scope = prepare(tree, base, head, cfg)
     except (ConfigError, ScopeError) as e:
         return unavailable(str(e))
     if not scope.files:
-        return Result("pass", "MUTANTS: nothing to mutate", "MUTANTS: nothing to mutate")
+        line = "MUTANTS: nothing to mutate"
+        if scope.skipped:
+            line += f" ({_plural(len(scope.skipped), 'changed file')} left out: {skipped_summary(scope)})"
+        return Result("pass", line, line)
     runner = Runner(cfg.budget, {"PLOWLINE_BASE": base, "PLOWLINE_HEAD": head, **(env or {})})
     outcomes: list[Outcome] = []
+    warnings: list[str] = []
     over_budget = False
     work = Path(tempfile.mkdtemp(prefix="plowline-mutants-"))
     try:
         for n, (engine, files) in enumerate(group_files(scope, cfg)):
             job = write_job(tree, scope, files, work, n)
-            before = _snapshot(tree, engine.leftovers)
+            guard = TreeGuard(tree, engine.leftovers)
             try:
-                outcomes.append(engine.execute(job, runner))
+                with guard:
+                    outcomes.append(check_coverage(engine.execute(job, runner), files))
             except BudgetExceeded:
                 over_budget = True
                 break
+            except Exception as e:  # a report Plowline could not read is not proof against any lane
+                outcomes.append(Outcome(engine.name, unavailable=f"crashed: {type(e).__name__}: {e}"))
             finally:
-                _clean(tree, engine.leftovers, before)
+                warnings += guard.warnings
     except ScopeError as e:
         return unavailable(str(e))
     finally:
         shutil.rmtree(work, ignore_errors=True)
-    return verdict(scope, cfg, outcomes, over_budget)
+    not_mutated = [f"{path} ({why})" for path, why in scope.skipped if why != "test file"]
+    if not_mutated:
+        warnings.append(f"not mutated: {', '.join(not_mutated)}")
+    return verdict(scope, cfg, outcomes, over_budget, warnings + runner.warnings)
 
 
-def verdict(scope: Scope, cfg: Config, outcomes: list[Outcome], over_budget: bool = False) -> Result:
-    """FAIL when more survivors than max_survivors are proven (or a generic engine said so); otherwise any engine
-    that could not run, or the budget running out, makes it UNAVAILABLE; otherwise PASS."""
+def verdict(scope: Scope, cfg: Config, outcomes: list[Outcome], over_budget: bool = False,
+            warnings: list[str] | None = None) -> Result:
+    """FAIL when more survivors than max_survivors are proven; otherwise any engine that could not run or judge,
+    or the budget running out, makes it UNAVAILABLE; otherwise PASS. Survivors proven by one engine still FAIL when
+    another engine could not run."""
     survivors = sorted((s for o in outcomes for s in o.survivors), key=lambda s: (s.path, s.line))
     killed = sum(o.killed for o in outcomes)
     on = f"on {_plural(scope.lines, 'changed line')}"
     lost = [o for o in outcomes if o.unavailable]
     reasons = [f"{o.engine}: {o.unavailable}" for o in lost] + ([budget_message(cfg.budget)] if over_budget else [])
-    notes = [o.note for o in outcomes if o.note]
-    red = [o for o in outcomes if o.red]
-    if len(survivors) > cfg.max_survivors or red:
-        count = len(survivors) if survivors else "unlisted"
-        line = f"MUTANTS: FAIL ({count} survivor{'' if len(survivors) == 1 else 's'} {on})"
-        body = survivor_lines(survivors) + [f"{o.engine} reported survivors (exit 1):\n{o.red}" for o in red]
-        status, notes = "fail", reasons + notes
+    notes = [o.note for o in outcomes if o.note] + list(warnings or [])
+    if len(survivors) > cfg.max_survivors:
+        line = f"MUTANTS: FAIL ({_plural(len(survivors), 'survivor')} {on})"
+        body, status, notes = survivor_lines(survivors), "fail", reasons + notes
     elif reasons:
         line = f"MUTANTS: UNAVAILABLE ({'; '.join(reasons)})"
         body, status = [], "unavailable"
@@ -968,7 +1154,7 @@ def explain(tree: Path, base: str, head: str, cfg: Config | None = None) -> str:
     """The scope and the exact commands `pl check` would run. Runs no engine."""
     tree = Path(tree)
     cfg, scope = prepare(tree, base, head, cfg)
-    out = [f"scope: {base[:12]}..{head[:12]}, {_plural(len(scope.files), 'file')}, "
+    out = [f"scope: {base[:12]}..{head[:12] or 'the working tree'}, {_plural(len(scope.files), 'file')}, "
            f"{_plural(scope.lines, 'changed line')}"]
     for f in scope.files:
         out.append(f"  {f.path}  lines {', '.join(f'{a}-{b}' if a != b else str(a) for a, b in f.ranges)}")

@@ -1,0 +1,491 @@
+{
+  "outcomes": [
+    {
+      "scenario": "Baseline",
+      "summary": "Success",
+      "log_path": "log/baseline.log",
+      "diff_path": null,
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.401345383,
+          "process_status": "Success",
+          "argv": [
+            "/home/codecombustion/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=shop@0.1.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.100906042,
+          "process_status": "Success",
+          "argv": [
+            "/home/codecombustion/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=shop@0.1.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "src/lib.rs:3:5: replace shipping -> u32 with 0",
+          "package": "shop",
+          "file": "src/lib.rs",
+          "function": {
+            "function_name": "shipping",
+            "return_type": "-> u32",
+            "span": {
+              "start": {
+                "line": 1,
+                "column": 1
+              },
+              "end": {
+                "line": 8,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 3,
+              "column": 5
+            },
+            "end": {
+              "line": 7,
+              "column": 9
+            }
+          },
+          "replacement": "0",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/src__lib.rs_line_3_col_5.log",
+      "diff_path": "diff/src__lib.rs_line_3_col_5.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.351198864,
+          "process_status": "Success",
+          "argv": [
+            "/home/codecombustion/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=shop@0.1.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.050778751,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/home/codecombustion/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=shop@0.1.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "src/lib.rs:3:5: replace shipping -> u32 with 1",
+          "package": "shop",
+          "file": "src/lib.rs",
+          "function": {
+            "function_name": "shipping",
+            "return_type": "-> u32",
+            "span": {
+              "start": {
+                "line": 1,
+                "column": 1
+              },
+              "end": {
+                "line": 8,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 3,
+              "column": 5
+            },
+            "end": {
+              "line": 7,
+              "column": 9
+            }
+          },
+          "replacement": "1",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/src__lib.rs_line_3_col_5_001.log",
+      "diff_path": "diff/src__lib.rs_line_3_col_5_001.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.301135179,
+          "process_status": "Success",
+          "argv": [
+            "/home/codecombustion/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=shop@0.1.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.050724214,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/home/codecombustion/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=shop@0.1.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "src/lib.rs:4:15: replace > with == in shipping",
+          "package": "shop",
+          "file": "src/lib.rs",
+          "function": {
+            "function_name": "shipping",
+            "return_type": "-> u32",
+            "span": {
+              "start": {
+                "line": 1,
+                "column": 1
+              },
+              "end": {
+                "line": 8,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 4,
+              "column": 15
+            },
+            "end": {
+              "line": 4,
+              "column": 16
+            }
+          },
+          "replacement": "==",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "MissedMutant",
+      "log_path": "log/src__lib.rs_line_4_col_15.log",
+      "diff_path": "diff/src__lib.rs_line_4_col_15.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.30112164,
+          "process_status": "Success",
+          "argv": [
+            "/home/codecombustion/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=shop@0.1.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.050775715,
+          "process_status": "Success",
+          "argv": [
+            "/home/codecombustion/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=shop@0.1.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "src/lib.rs:4:15: replace > with < in shipping",
+          "package": "shop",
+          "file": "src/lib.rs",
+          "function": {
+            "function_name": "shipping",
+            "return_type": "-> u32",
+            "span": {
+              "start": {
+                "line": 1,
+                "column": 1
+              },
+              "end": {
+                "line": 8,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 4,
+              "column": 15
+            },
+            "end": {
+              "line": 4,
+              "column": 16
+            }
+          },
+          "replacement": "<",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/src__lib.rs_line_4_col_15_001.log",
+      "diff_path": "diff/src__lib.rs_line_4_col_15_001.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.300958185,
+          "process_status": "Success",
+          "argv": [
+            "/home/codecombustion/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=shop@0.1.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.050688469,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/home/codecombustion/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=shop@0.1.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "src/lib.rs:4:15: replace > with >= in shipping",
+          "package": "shop",
+          "file": "src/lib.rs",
+          "function": {
+            "function_name": "shipping",
+            "return_type": "-> u32",
+            "span": {
+              "start": {
+                "line": 1,
+                "column": 1
+              },
+              "end": {
+                "line": 8,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 4,
+              "column": 15
+            },
+            "end": {
+              "line": 4,
+              "column": 16
+            }
+          },
+          "replacement": ">=",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "MissedMutant",
+      "log_path": "log/src__lib.rs_line_4_col_15_002.log",
+      "diff_path": "diff/src__lib.rs_line_4_col_15_002.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.30123303,
+          "process_status": "Success",
+          "argv": [
+            "/home/codecombustion/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=shop@0.1.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.050766515,
+          "process_status": "Success",
+          "argv": [
+            "/home/codecombustion/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=shop@0.1.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "src/lib.rs:5:21: replace * with + in shipping",
+          "package": "shop",
+          "file": "src/lib.rs",
+          "function": {
+            "function_name": "shipping",
+            "return_type": "-> u32",
+            "span": {
+              "start": {
+                "line": 1,
+                "column": 1
+              },
+              "end": {
+                "line": 8,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 5,
+              "column": 21
+            },
+            "end": {
+              "line": 5,
+              "column": 22
+            }
+          },
+          "replacement": "+",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "MissedMutant",
+      "log_path": "log/src__lib.rs_line_5_col_21.log",
+      "diff_path": "diff/src__lib.rs_line_5_col_21.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.301069719,
+          "process_status": "Success",
+          "argv": [
+            "/home/codecombustion/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=shop@0.1.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.050693002,
+          "process_status": "Success",
+          "argv": [
+            "/home/codecombustion/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=shop@0.1.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "src/lib.rs:5:21: replace * with / in shipping",
+          "package": "shop",
+          "file": "src/lib.rs",
+          "function": {
+            "function_name": "shipping",
+            "return_type": "-> u32",
+            "span": {
+              "start": {
+                "line": 1,
+                "column": 1
+              },
+              "end": {
+                "line": 8,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 5,
+              "column": 21
+            },
+            "end": {
+              "line": 5,
+              "column": 22
+            }
+          },
+          "replacement": "/",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "MissedMutant",
+      "log_path": "log/src__lib.rs_line_5_col_21_001.log",
+      "diff_path": "diff/src__lib.rs_line_5_col_21_001.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.301127802,
+          "process_status": "Success",
+          "argv": [
+            "/home/codecombustion/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=shop@0.1.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.050921503,
+          "process_status": "Success",
+          "argv": [
+            "/home/codecombustion/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=shop@0.1.0"
+          ]
+        }
+      ]
+    }
+  ],
+  "total_mutants": 7,
+  "missed": 4,
+  "caught": 3,
+  "timeout": 0,
+  "unviable": 0,
+  "success": 0,
+  "start_time": "2026-11-08T04:03:12.052996618Z",
+  "end_time": "2026-11-08T04:03:15.076101462Z",
+  "cargo_mutants_version": "27.1.0"
+}

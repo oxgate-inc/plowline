@@ -1,0 +1,27 @@
+/// Shipping for a parcel of `weight` kilograms.
+pub fn shipping(weight: u32) -> u32 {
+    let base = 5;
+    if weight > 10 {
+        return base * 3;
+    }
+    base
+}
+
+pub fn untouched(a: u32) -> u32 {
+    a + 1
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn light_parcel() {
+        assert_eq!(shipping(1), 5);
+    }
+
+    #[test]
+    fn untouched_adds_one() {
+        assert_eq!(untouched(1), 2);
+    }
+}

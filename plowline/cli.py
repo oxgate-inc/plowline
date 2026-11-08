@@ -1266,24 +1266,36 @@ def cmd_check(y: Yard, a) -> int:
         cfg = mutants.load_config(here if (here / CONFIG_NAME).exists() else y.root)
     except mutants.ConfigError as e:
         raise YardError(f"plowline.toml: {e}")
+    at_head = head == git("rev-parse", "HEAD", cwd=here)
+    dirty = at_head and bool(git("status", "--porcelain", "--untracked-files=no", cwd=here))
+    if a.dirty and not at_head:
+        raise YardError("pl check --dirty checks this working tree; it takes no other ref")
+    if dirty and not a.dirty and not a.explain:
+        raise YardError(f"pl check: {here} has uncommitted changes. Commit or stash them first, or pass --dirty to "
+                        "check the working tree (tracked files) against the base")
+    target = mutants.WORKTREE if a.dirty else head
     if a.explain:
         try:
-            print(mutants.explain(here, base, head, cfg))
+            print(mutants.explain(here, base, target, cfg))
         except mutants.ScopeError as e:
             raise YardError(str(e))
         return 0
+    if base == head and not a.dirty:
+        print(f"MUTANTS: nothing to mutate ({a.ref} has no commits beyond {base_ref})")
+        return 0
     tree, scratch = here, None
-    if head != git("rev-parse", "HEAD", cwd=here):
+    if not at_head:
         scratch = Path(tempfile.mkdtemp(prefix="plowline-check-"))
         shutil.rmtree(scratch)
         git("worktree", "add", "--quiet", "--detach", str(scratch), head, cwd=here)
         tree = scratch
         print(f"checking {a.ref} {head[:9]} in a temporary worktree (this one has {git('rev-parse', '--short', 'HEAD', cwd=here)})")
-    elif git("status", "--porcelain", "--untracked-files=no", cwd=here):
-        print("note: uncommitted changes here are tested too, but only committed lines are in scope")
-    print(f"pl check: {a.ref} {head[:9]} against {base_ref} (merge-base {base[:9]})")
+    what = "the working tree" if a.dirty else f"{a.ref} {head[:9]}"
+    print(f"pl check: {what} against {base_ref} (merge-base {base[:9]})")
     try:
-        result = mutants.run(tree, base, head, cfg)
+        result = mutants.run(tree, base, target, cfg)
+    except Exception as e:  # never let a crash read as exit 1 (FAIL)
+        result = mutants.unavailable(f"crashed: {type(e).__name__}: {e}")
     finally:
         if scratch:
             git("worktree", "remove", "--force", str(scratch), cwd=here, check=False)
@@ -1548,6 +1560,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("ref", nargs="?", default="HEAD", help="the commit to check (default HEAD)")
     p.add_argument("--base", help="compare with this ref (default: the trunk); the merge-base is used")
     p.add_argument("--explain", action="store_true", help="print the scope and the engine commands; run nothing")
+    p.add_argument("--dirty", action="store_true",
+                   help="check the working tree (tracked changes included) instead of refusing uncommitted changes")
     p = sub.add_parser("resume", help="reopen a bounced lane and print its notice")
     p.add_argument("name")
     sub.add_parser("clean", help="remove worktrees and branches of landed lanes")

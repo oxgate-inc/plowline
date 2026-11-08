@@ -19,11 +19,20 @@
   or unavailable; unavailable ends the gate with `GATE: UNAVAILABLE at step
   i/n`, like a command that was not found. A built-in step that crashes is
   UNAVAILABLE too. Shell steps are unchanged.
-- **`pl check [<ref>] [--base <ref>] [--explain]`.** The same check in your
-  worktree, with no lane and no train: `HEAD` against its merge-base with the
-  trunk by default. Exit 0 pass, 1 fail, 2 unavailable. A ref other than `HEAD`
-  is checked in a temporary worktree. `--explain` prints the files, line ranges
-  and engine commands, and runs nothing.
+- **Never a quiet pass, never a crash read as red.** A changed file the
+  engine's report does not cover, a mutant status Plowline cannot judge, an
+  engine report it cannot read, or a generic command that exits 1 without
+  listing survivors is UNAVAILABLE. A mutant counts when its span overlaps a
+  changed line (cargo-mutants spans come from `outcomes.json`). An engine's
+  earlier output is moved aside for the run and put back, and tracked files it
+  changed are checked out again.
+- **`pl check [<ref>] [--base <ref>] [--explain] [--dirty]`.** The same check in
+  your worktree, with no lane and no train: `HEAD` against its merge-base with
+  the trunk by default. Exit 0 pass, 1 fail, 2 unavailable (a crash too). A ref
+  other than `HEAD` is checked in a temporary worktree. Uncommitted changes are
+  refused unless `--dirty`, which checks the working tree against the base.
+  `--explain` prints the files, line ranges and engine commands, and runs
+  nothing.
 - **Briefs.** With `builtin:mutants` in the gate, `pl new --brief` asks the
   agent to run `pl check` before `pl done`.
 - **Setup and example config** carry a commented `[mutants]` block.

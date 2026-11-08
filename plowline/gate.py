@@ -109,9 +109,10 @@ def run_gate(steps: list[str], ctx: GateContext) -> GateResult:
                 outputs.append(ran.output.strip())
                 joined = "\n".join(o for o in outputs if o)
                 summary = ran.summary or (ran.output.strip().splitlines() or [ran.status])[0]
-                if ran.status == "unavailable":
-                    return GateResult("unavailable", f"GATE: UNAVAILABLE at {label}: {summary}", joined)
-                if ran.status != "pass":
+                if ran.status not in ("pass", "fail"):  # unavailable, or a status Plowline does not know
+                    why = summary if ran.status == "unavailable" else f"unknown status {ran.status!r}: {summary}"
+                    return GateResult("unavailable", f"GATE: UNAVAILABLE at {label}: {why}", joined)
+                if ran.status == "fail":
                     return GateResult("fail", f"GATE: FAIL at {label}: {summary}", joined)
                 continue
             code, out = ran

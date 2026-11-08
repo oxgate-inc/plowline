@@ -1,0 +1,14 @@
+diff --git a/src/lib.rs b/src/lib.rs
+index c870a0a..fa0503b 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -1,6 +1,9 @@
+ /// Shipping for a parcel of `weight` kilograms.
+ pub fn shipping(weight: u32) -> u32 {
+     let base = 5;
++    if weight > 10 {
++        return base * 3;
++    }
+     base
+ }
+ 

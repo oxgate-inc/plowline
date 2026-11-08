@@ -131,9 +131,18 @@ class ScopeTest(unittest.TestCase):
         files = {f.path: f.ranges for f in mutants.parse_diff(self.DIFF)}
         self.assertEqual(files, {"app/a.py": [(4, 5), (12, 13)], "lib/new_name.py": [(7, 7)], "café.py": [(1, 1)]})
 
+    def test_an_added_line_that_looks_like_a_header_is_not_one(self):
+        diff = "\n".join([
+            "diff --git a/y.js b/y.js", "--- a/y.js", "+++ b/y.js",
+            "@@ -1 +1,2 @@", "-a", "+++ c", "+--- d",  # added lines "++ c" and "--- d"
+            "@@ -9 +10 @@", "-x", "+y"])
+        self.assertEqual([(f.path, f.ranges) for f in mutants.parse_diff(diff)], [("y.js", [(1, 2), (10, 10)])])
+
     def test_test_files_are_not_mutated(self):
         for path in ("test_x.py", "pkg/x_test.go", "web/a.test.ts", "web/a.spec.js", "tests/helpers.py",
-                     "src/test/Foo.java", "web/__tests__/a.js", "Shop.Tests/CalcTests.cs", "CalcTest.cs"):
+                     "src/test/Foo.java", "web/__tests__/a.js", "Shop.Tests/CalcTests.cs", "CalcTest.cs",
+                     "app/tests.py", "app/views_tests.py", "conftest.py", "src/conftest.py", "Shop/CalcSpec.cs",
+                     "web/login.cy.ts", "e2e/login.ts"):
             self.assertTrue(mutants.is_test_file(path), path)
         for path in ("src/app.py", "testing.py", "contest/a.py", "latest.go", "src/Calc.cs"):
             self.assertFalse(mutants.is_test_file(path), path)
@@ -197,16 +206,43 @@ class MutmutAdapterTest(unittest.TestCase):
         globs = mutants.Mutmut.targets(j)
         metas = {"tasks/counter.py": fixture("mutmut", "counter.py.meta")}
         shows = {f"tasks.counter.x_count_finished__mutmut_{n}": fixture("mutmut", f"show_{n}.txt") for n in range(1, 6)}
-        survivors, killed = mutants.Mutmut.parse(metas, shows, j.sources, j.files, globs)
-        self.assertEqual(killed, 4)
-        self.assertEqual([(s.path, s.line, s.what) for s in survivors], [("tasks/counter.py", 3, "removed not")])
+        parsed = mutants.Mutmut.parse(metas, shows, j.sources, j.files, globs)
+        self.assertEqual(parsed.killed, 4)
+        self.assertEqual([(s.path, s.line, s.what) for s in parsed.survivors], [("tasks/counter.py", 3, "removed not")])
+        self.assertEqual(parsed.evaluated, {"tasks/counter.py": 5})
 
     def test_a_mutant_outside_the_changed_lines_is_not_a_survivor(self):
         j = self.counter_job(ranges=((2, 2),))  # only the docstring changed
         metas = {"tasks/counter.py": fixture("mutmut", "counter.py.meta")}
         shows = {"tasks.counter.x_count_finished__mutmut_3": fixture("mutmut", "show_3.txt")}
-        survivors, _ = mutants.Mutmut.parse(metas, shows, j.sources, j.files, mutants.Mutmut.targets(j))
-        self.assertEqual(survivors, [])
+        parsed = mutants.Mutmut.parse(metas, shows, j.sources, j.files, mutants.Mutmut.targets(j))
+        self.assertEqual(parsed.survivors, [])
+
+    def test_a_package_init_is_named_like_mutmut_names_it(self):
+        # mutmut 3 drops `.__init__.` from mutant names: pkg/__init__.py -> pkg.x_f__mutmut_1
+        self.assertEqual(mutants.mutmut_module("pkg/__init__.py"), "pkg")
+        self.assertEqual(mutants.mutmut_module("src/pkg/sub/__init__.py"), "pkg.sub")
+        self.assertEqual(mutants.mutmut_module("src/pkg/mod.py"), "pkg.mod")
+        j = job([mutants.FileScope("pkg/__init__.py", [(2, 2)])], sources={"pkg/__init__.py": "def f(a):\n    return a\n"})
+        self.assertEqual(mutants.Mutmut.targets(j), ["pkg.x_f__mutmut_*"])
+
+    def test_results_that_name_no_mutant_of_the_file_are_not_a_pass(self):
+        j = self.counter_job()
+        renamed = fixture("mutmut", "counter.py.meta").replace("tasks.counter.", "tasks.other.")
+        parsed = mutants.Mutmut.parse({"tasks/counter.py": renamed}, {}, j.sources, j.files, mutants.Mutmut.targets(j))
+        outcome = mutants.check_coverage(mutants.Outcome.of("mutmut", parsed), j.files)
+        self.assertEqual(outcome.unavailable, "its report has nothing for tasks/counter.py")
+
+    def test_an_unknown_mutmut_status_is_unavailable(self):
+        j = self.counter_job()
+        meta = json.loads(fixture("mutmut", "counter.py.meta"))
+        meta["exit_code_by_key"]["tasks.counter.x_count_finished__mutmut_2"] = 35  # suspicious
+        meta["exit_code_by_key"]["tasks.counter.x_count_finished__mutmut_4"] = None  # not checked
+        parsed = mutants.Mutmut.parse({"tasks/counter.py": json.dumps(meta)}, {}, j.sources, j.files,
+                                      mutants.Mutmut.targets(j))
+        outcome = mutants.Outcome.of("mutmut", parsed)
+        self.assertIn("could not judge 2 mutant(s)", outcome.unavailable)
+        self.assertIn("x_count_finished__mutmut_2: exit 35", outcome.unavailable)
 
     def test_a_decorated_function_with_a_comment_above_is_placed(self):
         source = "import functools\n\n\n# keeps the cache warm\n@functools.cache\ndef f(a):\n    return a > 0\n"
@@ -217,6 +253,18 @@ class MutmutAdapterTest(unittest.TestCase):
         self.assertEqual(mutants.Mutmut._place(source.splitlines(), (5, 7), old), [7])
         self.assertEqual(added, ["    return a >= 0"])
 
+    def test_an_ambiguous_place_falls_back_to_the_function(self):
+        source = "def f(a):\n    x = a + 1\n    y = 2\n    x = a + 1\n    return x\n".split("\n")[:-1]
+        self.assertIsNone(mutants.Mutmut._place(source, (1, 5), [("-", "    x = a + 1")]))
+        self.assertEqual(mutants.Mutmut._place(source, (1, 5), [("-", "    y = 2")]), [3])
+
+    def test_lines_are_split_on_newline_only(self):
+        self.assertEqual(mutants.lines_of("a\x0cb c\nd\r\ne\n"), ["a\x0cb c", "d", "e"])
+        source = "def f(a):\n    s = 'x\x0cy'\n    return a > 0\n"
+        functions = mutants.python_functions(source)
+        self.assertEqual(functions, [(None, "f", 1, 3)])
+        self.assertEqual(mutants.Mutmut._place(mutants.lines_of(source), (1, 3), [("-", "    return a > 0")]), [3])
+
     def test_methods_are_placed_in_their_class(self):
         j = job([mutants.FileScope("tasks/shelf.py", [(10, 11)])],
                 sources={"tasks/shelf.py": fixture("mutmut", "shelf.py.txt")})
@@ -224,9 +272,9 @@ class MutmutAdapterTest(unittest.TestCase):
         self.assertEqual(globs, ["tasks.shelf.x?Shelf?total__mutmut_*"])
         metas = {"tasks/shelf.py": fixture("mutmut", "shelf.py.meta")}
         shows = {f"tasks.shelf.xǁShelfǁtotal__mutmut_{n}": fixture("mutmut", f"shelf_show_{n}.txt") for n in (6, 7)}
-        survivors, killed = mutants.Mutmut.parse(metas, shows, j.sources, j.files, globs)
-        self.assertEqual(killed, 5)  # untouched() and __init__ were not run and are not counted
-        self.assertEqual([(s.line, s.what) for s in survivors], [(11, "changed > to >="), (11, "changed 0 to 1")])
+        parsed = mutants.Mutmut.parse(metas, shows, j.sources, j.files, globs)
+        self.assertEqual(parsed.killed, 5)  # untouched() and __init__ were not run and are not counted
+        self.assertEqual([(s.line, s.what) for s in parsed.survivors], [(11, "changed > to >="), (11, "changed 0 to 1")])
 
 
 class StrykerAdapterTest(unittest.TestCase):
@@ -235,52 +283,93 @@ class StrykerAdapterTest(unittest.TestCase):
         ranges = "src/price.ts:2-3,src/cart.ts:5-5,src/cart.ts:9-12"
         self.assertEqual(mutants.StrykerJS().command(j),
                          f"npx --no stryker run --mutate {mutants.quote(ranges)} --reporters json")
-        survivors, killed = mutants.parse_stryker_json(fixture("stryker-js", "mutation.json"), j)
-        self.assertEqual(killed, 3)  # Killed, Timeout, Killed on lines 2-3
-        self.assertEqual([(s.path, s.line, s.what) for s in survivors],
+        parsed = mutants.parse_stryker_json(fixture("stryker-js", "mutation.json"), j)
+        self.assertEqual(parsed.killed, 3)  # Killed, Timeout, Killed on lines 2-3
+        self.assertEqual([(s.path, s.line, s.what) for s in parsed.survivors],
                          [("src/price.ts", 2, "changed > to >="), ("src/price.ts", 2, "block statement: {}")])
+        outcome = mutants.check_coverage(mutants.Outcome.of("StrykerJS", parsed), j.files)
+        self.assertEqual(outcome.unavailable, "its report has nothing for src/cart.ts")
 
     def test_stryker_net_command_and_absolute_paths(self):
         tree = Path(tempfile.mkdtemp(prefix="plowline-snet-"))
         self.addCleanup(shutil.rmtree, tree, ignore_errors=True)
         j = job([mutants.FileScope("src/Calc.cs", [(7, 10)])], tree=tree)
         cmd = mutants.StrykerNet().command(j)
-        self.assertTrue(cmd.startswith(f"dotnet stryker --since:{'b' * 40} -r json -O "), cmd)
+        self.assertTrue(cmd.startswith(f"dotnet stryker --since:{mutants.quote('b' * 40)} -r json -O "), cmd)
         text = fixture("stryker-net", "mutation-report.json").replace("__TREE__", tree.resolve().as_posix())
-        survivors, killed = mutants.parse_stryker_json(text, j)
-        self.assertEqual(killed, 2)
-        self.assertEqual([(s.path, s.line, s.what) for s in survivors],
+        parsed = mutants.parse_stryker_json(text, j)
+        self.assertEqual(parsed.killed, 2)
+        self.assertEqual([(s.path, s.line, s.what) for s in parsed.survivors],
                          [("src/Calc.cs", 7, "changed > to >="), ("src/Calc.cs", 8, "block removal mutation")])
+        elsewhere = fixture("stryker-net", "mutation-report.json").replace("__TREE__", "/some/other/checkout")
+        outcome = mutants.check_coverage(mutants.Outcome.of("Stryker.NET", mutants.parse_stryker_json(elsewhere, j)),
+                                         j.files)
+        self.assertEqual(outcome.unavailable, "its report has nothing for src/Calc.cs")
 
 
 class CargoAndGremlinsTest(unittest.TestCase):
-    def test_cargo_mutants(self):
+    """cargo-mutants 27.1.0, a real run: shipping() gained an `if` on lines 4-6 (see fixtures/.../scope.diff)."""
+
+    def test_cargo_mutants_real_report(self):
         j = job([mutants.FileScope("src/lib.rs", [(4, 6)])])
         self.assertEqual(mutants.CargoMutants().command(j),
                          f"cargo mutants --in-diff {mutants.quote('scope.diff')} --output {mutants.quote('work')}")
-        survivors, killed = mutants.parse_cargo_mutants(
-            fixture("cargo-mutants", "missed.txt"), fixture("cargo-mutants", "caught.txt"),
-            fixture("cargo-mutants", "timeout.txt"), j)
-        self.assertEqual([(s.path, s.line, s.what) for s in survivors],
-                         [("src/lib.rs", 5, "replace is_even -> bool with true")])
-        self.assertEqual(killed, 3)
+        self.assertIn("+    if weight > 10 {", fixture("cargo-mutants", "scope.diff"))  # the diff it ran with
+        parsed = mutants.parse_cargo_outcomes(fixture("cargo-mutants", "outcomes.json"), j)
+        self.assertEqual([(s.line, s.what) for s in parsed.survivors],
+                         [(4, "replace > with == in shipping"), (4, "replace > with >= in shipping"),
+                          (5, "replace * with + in shipping"), (5, "replace * with / in shipping")])
+        self.assertEqual(parsed.killed, 3)  # the two body replacements (span 3-7) and `>` to `<`
+
+    def test_a_function_body_mutant_counts_on_any_changed_line_of_its_span(self):
+        # "replace shipping -> u32 with 0" starts on line 3 and spans 3-7; a lane that changed only line 6 still owns
+        # it. Here it is made a survivor (the real run caught it) to show it is not dropped.
+        j = job([mutants.FileScope("src/lib.rs", [(6, 6)])])
+        report = json.loads(fixture("cargo-mutants", "outcomes.json"))
+        for outcome in report["outcomes"]:
+            mutant = (outcome["scenario"] or {}).get("Mutant") if isinstance(outcome["scenario"], dict) else None
+            if mutant and mutant["genre"] == "FnValue":
+                outcome["summary"] = "MissedMutant"
+        parsed = mutants.parse_cargo_outcomes(json.dumps(report), j)
+        self.assertEqual([(s.line, s.what) for s in parsed.survivors],
+                         [(6, "replace shipping -> u32 with 0"), (6, "replace shipping -> u32 with 1")])
+        self.assertEqual(parsed.killed, 0)
+        self.assertEqual(missed_lines(fixture("cargo-mutants", "missed.txt")), [4, 4, 5, 5])  # missed.txt: start only
 
     def test_gremlins(self):
         j = job([mutants.FileScope("pkg/cart.go", [(10, 15)])])
-        self.assertEqual(mutants.Gremlins().command(j),
-                         f"gremlins unleash --diff {'b' * 40} -o {mutants.quote(str(Path('work') / 'gremlins.json'))}")
-        survivors, killed = mutants.parse_gremlins(fixture("gremlins", "gremlins.json"), j)
-        self.assertEqual(killed, 2)
-        self.assertEqual([(s.line, s.what) for s in survivors],
+        self.assertEqual(mutants.Gremlins().command(j), f"gremlins unleash --diff {mutants.quote('b' * 40)} "
+                                                        f"-o {mutants.quote(str(Path('work') / 'gremlins.json'))}")
+        parsed = mutants.parse_gremlins(fixture("gremlins", "gremlins.json"), j)
+        self.assertEqual(parsed.killed, 2)
+        self.assertEqual([(s.line, s.what) for s in parsed.survivors],
                          [(14, "changed an arithmetic operator (+ to -)"),
                           (15, "changed a comparison boundary (< to <=)")])
 
-    def test_generic_placeholders(self):
-        j = job([mutants.FileScope("a b.lua", [(1, 2), (5, 5)])])
+    def test_gremlins_ambiguous_names_are_not_judged(self):
+        text = json.dumps({"files": [{"file_name": "cart.go", "mutations": [
+            {"line": 3, "column": 1, "type": "ARITHMETIC_BASE", "status": "LIVED"}]}]})
+        j = job([mutants.FileScope("a/cart.go", [(3, 3)]), mutants.FileScope("b/cart.go", [(3, 3)])])
+        self.assertIn("cart.go (matches a/cart.go, b/cart.go)", mutants.parse_gremlins(text, j).unjudged)
+        one = job([mutants.FileScope("svc/cart.go", [(3, 3)])])
+        self.assertEqual([s.path for s in mutants.parse_gremlins(text, one).survivors], ["svc/cart.go"])
+
+    def test_generic_placeholders_are_all_quoted(self):
+        j = job([mutants.FileScope("a b.lua", [(1, 2), (5, 5)])], base="a;b", head="h h")
         engine = mutants.Generic(".lua", "mut {files} -r {ranges} -b {base} -h {head} -d {diff} {unknown}")
         q = mutants.quote
         self.assertEqual(engine.command(j), f"mut {q('a b.lua')} -r {q('a b.lua:1-2')} {q('a b.lua:5-5')} "
-                                            f"-b {'b' * 40} -h {'h' * 40} -d {q('scope.diff')} {{unknown}}")
+                                            f"-b {q('a;b')} -h {q('h h')} -d {q('scope.diff')} {{unknown}}")
+
+    def test_quoted_arguments_survive_the_shell(self):
+        value = "50% off %PATH% a;b $HOME 'x' \"y\""
+        p = subprocess.run(f"{PY} -c \"import sys; print(sys.argv[1])\" {mutants.quote(value)}", shell=True,
+                           capture_output=True, text=True)
+        self.assertEqual(p.stdout.rstrip("\n"), value, p.stderr)
+
+
+def missed_lines(text: str) -> list[int]:
+    return [int(line.split(":")[1]) for line in text.splitlines() if line.strip()]
 
 
 class VerdictTest(unittest.TestCase):
@@ -408,7 +497,54 @@ class EndToEndTest(FakeEngineCase):
         self.head = self.commit("tests only")
         self.base = self.git("rev-parse", "HEAD~1")
         r = self.run_mutants()
-        self.assertEqual((r.status, r.report), ("pass", "MUTANTS: nothing to mutate"))
+        self.assertEqual((r.status, r.report), ("pass", "MUTANTS: nothing to mutate (2 changed files left out: "
+                                                        "1 no engine for this file type, 1 test file)"))
+
+    def test_a_corrupt_report_is_unavailable_not_fail(self):
+        corrupt = self.tmp / "corrupt.meta"
+        corrupt.write_text('{"exit_code_by_key": {"tasks.counter.x_count_')
+        r = self.run_mutants(FAKE_METAS=json.dumps({"tasks/counter.py": str(corrupt)}))
+        self.assertEqual(r.status, "unavailable", r.report)
+        self.assertIn("mutmut: crashed: JSONDecodeError", r.line)
+
+    def test_results_for_another_module_are_unavailable_not_a_pass(self):
+        other = self.tmp / "other.meta"
+        other.write_text(fixture("mutmut", "counter.py.meta").replace("tasks.counter.", "tasks.elsewhere."))
+        r = self.run_mutants(FAKE_METAS=json.dumps({"tasks/counter.py": str(other)}))
+        self.assertEqual(r.line, "MUTANTS: UNAVAILABLE (mutmut: its report has nothing for tasks/counter.py)")
+
+    def test_a_targeted_file_without_fresh_results_is_unavailable(self):
+        self.write("tasks/shelf.py", fixture("mutmut", "shelf.py.txt"))
+        self.head = self.commit("two files")
+        self.base = self.git("rev-parse", "HEAD~2")
+        r = self.run_mutants()  # the stand-in writes results for counter.py only
+        self.assertEqual(r.status, "unavailable", r.report)
+        self.assertIn("mutmut: no fresh results for tasks/shelf.py", r.line)
+
+    def test_earlier_engine_output_is_moved_aside_and_put_back(self):
+        old = self.repo / "mutants" / "tasks" / "counter.py.meta"
+        meta = json.loads(fixture("mutmut", "counter.py.meta"))
+        meta["exit_code_by_key"]["tasks.counter.x_count_finished__mutmut_3"] = 1  # an old, green result
+        self.write("mutants/tasks/counter.py.meta", json.dumps(meta))
+        self.write("mutants/keep.txt", "mine\n")
+        r = self.run_mutants()
+        self.assertEqual(r.status, "fail", r.report)  # the fresh run's survivor, not the old green result
+        self.assertEqual(json.loads(old.read_text())["exit_code_by_key"]["tasks.counter.x_count_finished__mutmut_3"], 1)
+        self.assertEqual((self.repo / "mutants" / "keep.txt").read_text(), "mine\n")
+        self.assertFalse((self.repo / "mutants.plowline-aside").exists())
+
+    def test_a_tracked_file_the_engine_changes_is_checked_out_again(self):
+        self.write("engine.py", "import pathlib\npathlib.Path('data.json').write_text('overwritten')\n")
+        self.write("data.json", "{}\n")
+        self.write("app.lua", "a = 1\n")
+        self.base = self.commit("engine")
+        self.write("app.lua", "a = 2\n")
+        self.head = self.commit("lua")
+        cfg = mutants.config_from({"mutants": {"engines": {"lua": {"command": f'"{PY}" engine.py'}}}})
+        r = self.run_mutants(cfg)
+        self.assertEqual(r.status, "pass", r.report)
+        self.assertEqual((self.repo / "data.json").read_text(), "{}\n")
+        self.assertIn("checked them out again", r.report)
 
     def test_generic_engine(self):
         self.write("engine.py", GENERIC_ENGINE)
@@ -429,6 +565,9 @@ class EndToEndTest(FakeEngineCase):
         self.assertEqual(r.status, "fail", r.report)
         self.assertIn("app.lua:3  kept a SURVIVOR line  (no test failed)", r.report)
         self.assertEqual(run("3").status, "unavailable")
+        crashed = run("1")  # exit 1 with no `path:line what` line: a crash, not survivors
+        self.assertEqual(crashed.status, "unavailable", crashed.report)
+        self.assertIn("exited 1 but listed no survivor on a changed line", crashed.line)
         cfg = mutants.config_from({"mutants": {"engines": {"lua": {"command": "plowline-no-such-engine {files}"}}}})
         missing = self.run_mutants(cfg)
         self.assertEqual(missing.status, "unavailable", missing.report)
@@ -522,7 +661,33 @@ class CheckCommandTest(RepoCase):
         self.assertEqual(other.returncode, 1, other.stdout + other.stderr)
         self.assertIn("in a temporary worktree", other.stdout)
         same = self.pl("check", "feature", "--base", "feature")
-        self.assertEqual((same.returncode, same.stdout.strip().splitlines()[-1]), (0, "MUTANTS: nothing to mutate"))
+        self.assertEqual((same.returncode, same.stdout.strip()),
+                         (0, "MUTANTS: nothing to mutate (feature has no commits beyond feature)"))
+
+    def test_on_the_trunk_itself(self):
+        self.git("checkout", "-q", "main")
+        out = self.pl("check")
+        self.assertEqual((out.returncode, out.stdout.strip()), (0, "MUTANTS: nothing to mutate (HEAD has no commits "
+                                                                   "beyond main)"))
+
+    def test_uncommitted_changes_are_refused_unless_dirty(self):
+        self.change("fine\n")
+        (self.app / "notes.txt").write_text("fine\nSURVIVOR\n")
+        refused = self.pl("check")
+        self.assertEqual(refused.returncode, 2, refused.stdout + refused.stderr)
+        self.assertIn("Commit or stash them first, or pass --dirty", refused.stderr)
+        dirty = self.pl("check", "--dirty")
+        self.assertEqual(dirty.returncode, 1, dirty.stdout + dirty.stderr)
+        self.assertIn("pl check: the working tree against main", dirty.stdout)
+        self.assertIn("notes.txt:2  kept a SURVIVOR line  (no test failed)", dirty.stdout)  # uncommitted line, in scope
+        self.assertIn("lines 1-2", self.pl("check", "--dirty", "--explain").stdout)
+
+    def test_a_crash_exits_2_not_1(self):
+        self.change("fine\n")
+        with mock.patch("plowline.mutants.run", side_effect=ValueError("bad report")):
+            code, out = self.in_process("check")
+        self.assertEqual(code, 2, out)
+        self.assertIn("MUTANTS: UNAVAILABLE (crashed: ValueError: bad report)", out)
 
     def test_explain_prints_scope_and_commands_and_runs_nothing(self):
         self.change("SURVIVOR\n")
