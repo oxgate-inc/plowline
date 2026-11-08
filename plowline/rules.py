@@ -30,13 +30,16 @@ class TrunkRed(Exception):
     """The gate is red on the trunk alone: no lane can be blamed for it."""
 
 
-def find_green(members: Sequence[T], gate: Callable[[list[T]], bool]) -> tuple[list[T], list[T]]:
+def find_green(members: Sequence[T], gate: Callable[[list[T]], bool],
+               on_blame: Callable[[T, list[T]], None] | None = None) -> tuple[list[T], list[T]]:
     """Split a red train until the merged set is green.
 
     gate(subset) builds the trunk plus `subset` (in order) and answers whether the gate passed. Returns the
     largest set found green, in train order, and the lanes that turned it red. A lane is blamed only when
     the gate went red with it on top of a set already proven green. With two members the first probe is
     "drop the last one". If the bare trunk is red, TrunkRed is raised and nobody is blamed.
+    on_blame(lane, accepted) is told the green set each lane was blamed on top of; that exact set plus the
+    lane is always one that was gated red.
     """
     members = list(members)
     if gate(members):
@@ -50,6 +53,8 @@ def find_green(members: Sequence[T], gate: Callable[[list[T]], bool]) -> tuple[l
             if not trunk[0]:
                 raise TrunkRed()
         culprits.append(lane)
+        if on_blame:
+            on_blame(lane, list(accepted))
 
     def settle(accepted: list[T], group: list[T]) -> list[T]:
         """gate(accepted + group) is known red and accepted is known green."""
