@@ -1,0 +1,13 @@
+namespace Shop;
+
+public static class Calc
+{
+    public static int Shipping(int weight)
+    {
+        if (weight > 10)
+        {
+            return 15;
+        }
+        return 5;
+    }
+}

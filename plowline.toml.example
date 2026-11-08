@@ -14,3 +14,14 @@ strict_paths = false             # true: a lane that changes files outside its -
 max_lanes = 0                    # cap on lanes not yet landed; 0 for no cap
 worktrees = "../{repo}-lanes"    # where lane worktrees live
 env = ""                         # "stanchion" gives each lane its own database and ports; "off" turns it off
+
+# builtin:mutants: add it last in gate, e.g. gate = ["ruff check .", "python -m pytest -q", "builtin:mutants"],
+# to mutation-test the lines each train changed. The engine is yours to install (mutmut, StrykerJS, Stryker.NET,
+# cargo-mutants, Gremlins); `pl check --explain` shows what it would run.
+# [mutants]
+# max_survivors = 0              # survivors on changed lines a train may keep
+# budget = 600                   # seconds for all engines in one run; over it the train stops, no lane is blamed
+# skip = []                      # globs never mutated, e.g. ["src/legacy/**"]
+#
+# [mutants.engines.kt]           # any other extension, or a replacement for a built-in engine
+# command = "python tools/mutate_kotlin.py {ranges}"   # {files} {ranges} {base} {head} {diff}; exit 0 = none, 1 = survivors

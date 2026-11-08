@@ -1,5 +1,48 @@
 # Changelog
 
+## 0.3.0 (2026-11-08)
+
+- **`builtin:mutants`.** The first built-in gate step: a mutation test of the
+  lines the train added or changed. Scope comes from `git diff -U0 base..head`;
+  test files, `generated` files, `[mutants] skip` globs and extensions with no
+  engine are left out, and a change with nothing left passes with
+  `MUTANTS: nothing to mutate`. Engines by extension: mutmut 3 (`.py`),
+  StrykerJS (`.js .jsx .ts .tsx .mjs .cjs`), Stryker.NET (`.cs`), cargo-mutants
+  (`.rs`) and Gremlins (`.go`); `[mutants.engines.<ext>] command = "..."` adds
+  or replaces one, with `{files}`, `{ranges}`, `{base}`, `{head}` and `{diff}`.
+  Survivors on changed lines above `max_survivors` (default 0) are a FAIL, and
+  the report lists them as `path:line  what was mutated  (no test failed)`.
+  A missing engine, an engine that could not report, or a run over `budget`
+  (default 600 s, all engines together; the engine's process tree is stopped)
+  is UNAVAILABLE: the train stops and blames no lane.
+- **Built-in steps can say UNAVAILABLE.** A `builtin:` step returns pass, fail
+  or unavailable; unavailable ends the gate with `GATE: UNAVAILABLE at step
+  i/n`, like a command that was not found. A built-in step that crashes is
+  UNAVAILABLE too. Shell steps are unchanged.
+- **Never a quiet pass, never a crash read as red.** A changed file whose
+  changed code got no judged mutant (left out of the report, or every mutant
+  skipped, ignored or not compiled), a mutant status Plowline cannot judge, an
+  engine report it cannot read, or a generic command that exits 1 without
+  listing survivors is UNAVAILABLE. An edit only to comments, blank lines or
+  imports passes with a note. A mutant counts when its span overlaps a changed
+  line (cargo-mutants spans come from `outcomes.json`). An engine's earlier
+  output is moved aside for the run and put back (a stale aside from a killed
+  run stops the next one); other tracked files changed during a run are left
+  alone and named. A value with a double quote is never passed to cmd.exe.
+- **`pl check [<ref>] [--base <ref>] [--explain] [--dirty]`.** The same check in
+  your worktree, with no lane and no train: `HEAD` against its merge-base with
+  the trunk by default. Exit 0 pass, 1 fail, 2 unavailable (a crash too). A ref
+  other than `HEAD` is checked in a temporary worktree. Uncommitted changes are
+  refused unless `--dirty`, which checks the working tree against the base.
+  `--explain` prints the files, line ranges and engine commands, and runs
+  nothing.
+- **Briefs.** With `builtin:mutants` in the gate, `pl new --brief` asks the
+  agent to run `pl check` before `pl done`.
+- **Setup and example config** carry a commented `[mutants]` block.
+- **`pl demo`** adds lane f: a reversed condition whose test passes anyway.
+  `pl check` names the line when mutmut is installed, and says how to get it
+  when not.
+
 ## 0.2.0 (2026-11-07)
 
 ### Train

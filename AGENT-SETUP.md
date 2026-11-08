@@ -108,6 +108,16 @@ repository is the usual shape. Try it once by hand on a throwaway lane before
 turning it on. If you are not sure the person's agent CLI can do that, leave
 `repair` empty.
 
+If a mutation engine for their language is installed or easy to add (mutmut for
+Python, StrykerJS for JavaScript and TypeScript, Stryker.NET for C#,
+cargo-mutants for Rust, Gremlins for Go), offer `builtin:mutants` as the last
+gate step: it mutates only the lines each train changed and bounces a lane whose
+tests don't notice. Run `pl check --explain` to show them what it would run, then
+`pl check` once on a recent branch; if that takes minutes, raise
+`[mutants] budget` or narrow it with `skip`. Recommended: off until the gate
+itself is routine, and never without an installed engine (the train stops on an
+UNAVAILABLE gate).
+
 Show the person `git show --stat HEAD`, then ask before pushing. Lanes branch
 from the remote main, so they only see the setup once it's pushed:
 
@@ -142,6 +152,7 @@ Offer a five-minute tour. If they say yes:
    | Keep a control tower open | `pl watch` | the person, one terminal |
    | Finish a lane | `pl done <lane>` | the lane's agent |
    | Fix a bounced lane (prints its notice) | `pl resume <lane>` | the lane's agent |
+   | Check that the tests notice a change to the lines a branch changed | `pl check` | the lane's agent, before `pl done` |
    | Tidy up | `pl clean` | anyone |
 
 3. **Tell them they can delegate the dispatching to you.** From now on, in this

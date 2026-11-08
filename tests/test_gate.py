@@ -25,11 +25,10 @@ class GateStepsTest(unittest.TestCase):
             with self.assertRaises(gate.GateConfigError):
                 gate.gate_steps(bad)
 
-    def test_unknown_builtin_is_refused_and_mutants_is_named_as_coming(self):
-        with self.assertRaisesRegex(gate.GateConfigError, "no built-in gate named 'nope'"):
+    def test_unknown_builtin_is_refused_and_mutants_ships(self):
+        with self.assertRaisesRegex(gate.GateConfigError, r"no built-in gate named 'nope' \(built-in steps: builtin:mutants\)"):
             gate.gate_steps(["builtin:nope"])
-        with self.assertRaisesRegex(gate.GateConfigError, "0.3"):
-            gate.gate_steps("builtin:mutants")
+        self.assertEqual(gate.gate_steps(["npm test", "builtin:mutants"]), ["npm test", "builtin:mutants"])
 
 
 class RunGateTest(unittest.TestCase):
@@ -83,6 +82,31 @@ class RunGateTest(unittest.TestCase):
         self.assertEqual(seen, [["one"]])
         self.assertEqual(result.status, "fail")
         self.assertIn("2 mutants survived", result.output)
+
+    def test_a_builtin_can_report_pass_fail_or_unavailable(self):
+        for status, prefix in (("pass", "GATE: PASS (2 steps)"),
+                               ("fail", "GATE: FAIL at step 1/2 `builtin:fake`: FAKE: red"),
+                               ("unavailable", "GATE: UNAVAILABLE at step 1/2 `builtin:fake`: FAKE: red")):
+            fake = lambda ctx, status=status: gate.StepResult(status, "FAKE: red\ndetail", "FAKE: red")
+            with mock.patch.dict(gate.BUILTIN_GATES, {"fake": fake}):
+                result = gate.run_gate(["builtin:fake", self.step(0, "after-" + status)], self.ctx)
+            self.assertEqual((result.status, result.line), (status, prefix))
+            self.assertIn("detail", result.output)
+            self.assertEqual((self.tmp / ("after-" + status)).exists(), status == "pass")
+
+    def test_an_unknown_builtin_status_is_unavailable_not_red(self):
+        with mock.patch.dict(gate.BUILTIN_GATES, {"fake": lambda ctx: gate.StepResult("maybe", "?", "FAKE: ?")}):
+            result = gate.run_gate(["builtin:fake"], self.ctx)
+        self.assertEqual(result.status, "unavailable")
+        self.assertEqual(result.line, "GATE: UNAVAILABLE at step 1/1 `builtin:fake`: unknown status 'maybe': FAKE: ?")
+
+    def test_a_crashing_builtin_is_unavailable_not_red(self):
+        def crash(ctx):
+            raise RuntimeError("boom")
+        with mock.patch.dict(gate.BUILTIN_GATES, {"fake": crash}):
+            result = gate.run_gate(["builtin:fake"], self.ctx)
+        self.assertEqual(result.status, "unavailable")
+        self.assertIn("RuntimeError: boom", result.line)
 
 
 if __name__ == "__main__":

@@ -578,6 +578,22 @@ GATE_GUESSES = (("pyproject.toml", "python -m pytest -q"), ("package.json", "npm
                 ("pom.xml", "mvn -q test"), ("Makefile", "make test"))
 
 
+MUTANTS_COMMENT = """
+# builtin:mutants: add it last in gate to mutation-test the lines a train changed (needs an engine, see the README)
+# [mutants]
+# max_survivors = 0   # survivors on changed lines a train may keep
+# budget = 600        # seconds for all engines in one run; over it the train stops, no lane is blamed
+# skip = []           # globs never mutated, e.g. ["src/legacy/**"]
+"""
+
+CHECK_BEFORE_DONE = """
+Before `pl done`, run `pl check` in this worktree. It mutates the lines you changed
+and lists every change no test noticed (`path:line  what  (no test failed)`); the
+gate runs the same check. Add a test that fails on each survivor, commit, and run
+`pl check` again until it says `MUTANTS: PASS`. Put its MUTANTS: line in RESULT.
+"""
+
+
 def template(name: str) -> str:
     return (Path(__file__).parent / "templates" / name).read_text(encoding="utf-8")
 
@@ -645,7 +661,8 @@ def cmd_setup(y: Yard, a) -> int:
             f"on_land = {json.dumps(on_land)}  # optional: runs after each landing (deploy, tag, notify)\n"
             "strict_paths = false  # true: a lane that changes files outside its --paths bounces at pl done\n"
             "max_lanes = 0  # cap on lanes not yet landed; 0 for no cap\n"
-            'worktrees = "../{repo}-lanes"\n',
+            'worktrees = "../{repo}-lanes"\n'
+            + MUTANTS_COMMENT,
             encoding="utf-8")
         y.cfg.update(trunk=trunk, remote=remote, gate=gate, review=review, regenerate=regenerate, agent=agent,
                      land=land, on_land=on_land)
@@ -712,6 +729,8 @@ def scaffold_brief(y: Yard, name: str, paths: list[str]) -> Path:
     text = template("lane-brief.md").replace("<name>", name)
     if paths:
         text = text.replace("- <files or directories>\n", "".join(f"- {p}\n" for p in paths))
+    if "builtin:mutants" in y.gate_steps():
+        text = text.rstrip("\n") + "\n" + CHECK_BEFORE_DONE
     f.parent.mkdir(parents=True, exist_ok=True)
     f.write_text(text, encoding="utf-8")
     print(f"brief: wrote {f}; fill in the goal and acceptance before the agent starts")
@@ -1232,6 +1251,58 @@ def open_train_pr(y: Yard, lanes: list[Lane], head: str) -> None:
     print(f"opened train PR {url} for {len(lanes)} lane(s); the next train waits for it")
 
 
+def cmd_check(y: Yard, a) -> int:
+    """`pl check`: the builtin:mutants driver on any branch, in this worktree. Exit 0 pass, 1 fail, 2 unavailable."""
+    from plowline import mutants
+    here = Path(git("rev-parse", "--show-toplevel", cwd=Path.cwd()))
+    head = git("rev-parse", "--verify", "--quiet", f"{a.ref}^{{commit}}", cwd=here, check=False)
+    if not head:
+        raise YardError(f"pl check: {a.ref!r} is not a commit")
+    base_ref = a.base or y.trunk_ref()
+    base = git("merge-base", base_ref, head, cwd=here, check=False)
+    if not base:
+        raise YardError(f"pl check: {a.ref} and {base_ref} have no common ancestor (pass --base <ref>)")
+    try:
+        cfg = mutants.load_config(here if (here / CONFIG_NAME).exists() else y.root)
+    except mutants.ConfigError as e:
+        raise YardError(f"plowline.toml: {e}")
+    at_head = head == git("rev-parse", "HEAD", cwd=here)
+    dirty = at_head and bool(git("status", "--porcelain", "--untracked-files=no", cwd=here))
+    if a.dirty and not at_head:
+        raise YardError("pl check --dirty checks this working tree; it takes no other ref")
+    if dirty and not a.dirty and not a.explain:
+        raise YardError(f"pl check: {here} has uncommitted changes. Commit or stash them first, or pass --dirty to "
+                        "check the working tree (tracked files) against the base")
+    target = mutants.WORKTREE if a.dirty else head
+    if a.explain:
+        try:
+            print(mutants.explain(here, base, target, cfg))
+        except mutants.ScopeError as e:
+            raise YardError(str(e))
+        return 0
+    if base == head and not a.dirty:
+        print(f"MUTANTS: nothing to mutate ({a.ref} has no commits beyond {base_ref})")
+        return 0
+    tree, scratch = here, None
+    if not at_head:
+        scratch = Path(tempfile.mkdtemp(prefix="plowline-check-"))
+        shutil.rmtree(scratch)
+        git("worktree", "add", "--quiet", "--detach", str(scratch), head, cwd=here)
+        tree = scratch
+        print(f"checking {a.ref} {head[:9]} in a temporary worktree (this one has {git('rev-parse', '--short', 'HEAD', cwd=here)})")
+    what = "the working tree" if a.dirty else f"{a.ref} {head[:9]}"
+    print(f"pl check: {what} against {base_ref} (merge-base {base[:9]})")
+    try:
+        result = mutants.run(tree, base, target, cfg)
+    except Exception as e:  # never let a crash read as exit 1 (FAIL)
+        result = mutants.unavailable(f"crashed: {type(e).__name__}: {e}")
+    finally:
+        if scratch:
+            git("worktree", "remove", "--force", str(scratch), cwd=here, check=False)
+    print(result.report)
+    return {"pass": 0, "fail": 1}.get(result.status, 2)
+
+
 def cmd_resume(y: Yard, a) -> int:
     lane = y.load(a.name)
     if lane.state != "bounced":
@@ -1485,10 +1556,16 @@ def main(argv: list[str] | None = None) -> int:
                    help="full steam: stop once no lane is working, done or bounced")
     p.add_argument("--cycle-timeout", type=int, default=LOCK_STALE_SECONDS,
                    help="full steam: a lock older than this many seconds is stale (default 7200)")
+    p = sub.add_parser("check", help="mutation-test the lines this branch changed (builtin:mutants, anywhere)")
+    p.add_argument("ref", nargs="?", default="HEAD", help="the commit to check (default HEAD)")
+    p.add_argument("--base", help="compare with this ref (default: the trunk); the merge-base is used")
+    p.add_argument("--explain", action="store_true", help="print the scope and the engine commands; run nothing")
+    p.add_argument("--dirty", action="store_true",
+                   help="check the working tree (tracked changes included) instead of refusing uncommitted changes")
     p = sub.add_parser("resume", help="reopen a bounced lane and print its notice")
     p.add_argument("name")
     sub.add_parser("clean", help="remove worktrees and branches of landed lanes")
-    p = sub.add_parser("demo", help="five lanes and two trains in a throwaway repo")
+    p = sub.add_parser("demo", help="five lanes, two trains and a pl check in a throwaway repo")
     p.add_argument("--keep", action="store_true", help="keep the throwaway repo to look around")
     a = ap.parse_args(argv)
     if a.cmd == "demo":
@@ -1503,7 +1580,7 @@ def main(argv: list[str] | None = None) -> int:
         y = Yard(Path.cwd())
         return {"setup": cmd_setup, "init": cmd_setup, "new": cmd_new, "status": cmd_status, "show": cmd_show,
                 "done": cmd_done, "train": cmd_train, "resume": cmd_resume, "open": cmd_open,
-                "watch": cmd_watch, "clean": cmd_clean}[a.cmd](y, a)
+                "watch": cmd_watch, "clean": cmd_clean, "check": cmd_check}[a.cmd](y, a)
     except YardError as e:
         print(f"plowline: {e}", file=sys.stderr)
         return 2

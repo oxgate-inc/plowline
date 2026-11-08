@@ -1,0 +1,8 @@
+# tasks.shelf.xǁShelfǁtotal__mutmut_7: survived
+--- tasks/shelf.py
++++ tasks/shelf.py
+@@ -1,3 +1,3 @@
+ def total(self):
+     """Sum of the positive counts."""
+-    return sum(i["n"] for i in self.items if i["n"] > 0)
++    return sum(i["n"] for i in self.items if i["n"] > 1)

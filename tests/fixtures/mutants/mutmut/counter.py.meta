@@ -1,0 +1,27 @@
+{
+    "exit_code_by_key": {
+        "tasks.counter.x_count_finished__mutmut_1": 1,
+        "tasks.counter.x_count_finished__mutmut_2": 1,
+        "tasks.counter.x_count_finished__mutmut_3": 0,
+        "tasks.counter.x_count_finished__mutmut_4": 1,
+        "tasks.counter.x_count_finished__mutmut_5": 1
+    },
+    "hash_by_function_name": {
+        "x_count_finished": "419b4ca3f016"
+    },
+    "type_check_error_by_key": {},
+    "durations_by_key": {
+        "tasks.counter.x_count_finished__mutmut_1": 0.023842,
+        "tasks.counter.x_count_finished__mutmut_3": 0.022806,
+        "tasks.counter.x_count_finished__mutmut_2": 0.024539,
+        "tasks.counter.x_count_finished__mutmut_4": 0.022996,
+        "tasks.counter.x_count_finished__mutmut_5": 0.023785
+    },
+    "estimated_durations_by_key": {
+        "tasks.counter.x_count_finished__mutmut_1": 7.49260070733726e-05,
+        "tasks.counter.x_count_finished__mutmut_2": 7.49260070733726e-05,
+        "tasks.counter.x_count_finished__mutmut_3": 7.49260070733726e-05,
+        "tasks.counter.x_count_finished__mutmut_4": 7.49260070733726e-05,
+        "tasks.counter.x_count_finished__mutmut_5": 7.49260070733726e-05
+    }
+}

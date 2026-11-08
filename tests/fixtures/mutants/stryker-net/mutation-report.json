@@ -1,0 +1,110 @@
+{
+  "_imitates": "Stryker.NET 5.0 json reporter, <output>/reports/mutation-report.json; file keys are absolute (__TREE__ is replaced by the test)",
+  "schemaVersion": "1",
+  "thresholds": {
+    "high": 80,
+    "low": 60
+  },
+  "files": {
+    "__TREE__/src/Calc.cs": {
+      "language": "cs",
+      "source": "namespace Shop;\n\npublic static class Calc\n{\n    public static int Shipping(int weight)\n    {\n        if (weight > 10)\n        {\n            return 15;\n        }\n        return 5;\n    }\n}\n",
+      "mutants": [
+        {
+          "id": "1",
+          "mutatorName": "Equality mutation",
+          "location": {
+            "start": {
+              "line": 7,
+              "column": 13
+            },
+            "end": {
+              "line": 7,
+              "column": 24
+            }
+          },
+          "status": "Survived",
+          "replacement": "weight >= 10"
+        },
+        {
+          "id": "2",
+          "mutatorName": "Equality mutation",
+          "location": {
+            "start": {
+              "line": 7,
+              "column": 13
+            },
+            "end": {
+              "line": 7,
+              "column": 24
+            }
+          },
+          "status": "Killed",
+          "replacement": "weight < 10"
+        },
+        {
+          "id": "3",
+          "mutatorName": "Block removal mutation",
+          "location": {
+            "start": {
+              "line": 8,
+              "column": 9
+            },
+            "end": {
+              "line": 10,
+              "column": 10
+            }
+          },
+          "status": "Survived"
+        },
+        {
+          "id": "4",
+          "mutatorName": "Block removal mutation",
+          "location": {
+            "start": {
+              "line": 9,
+              "column": 13
+            },
+            "end": {
+              "line": 9,
+              "column": 23
+            }
+          },
+          "status": "Timeout"
+        },
+        {
+          "id": "5",
+          "mutatorName": "Statement mutation",
+          "location": {
+            "start": {
+              "line": 11,
+              "column": 9
+            },
+            "end": {
+              "line": 11,
+              "column": 18
+            }
+          },
+          "status": "Survived",
+          "replacement": ";"
+        },
+        {
+          "id": "6",
+          "mutatorName": "String mutation",
+          "location": {
+            "start": {
+              "line": 1,
+              "column": 1
+            },
+            "end": {
+              "line": 1,
+              "column": 3
+            }
+          },
+          "status": "Ignored",
+          "replacement": "\"\""
+        }
+      ]
+    }
+  }
+}
