@@ -1,4 +1,5 @@
 """builtin:mutants and pl check: scope from the diff, the engine adapters, the verdict, the gate and the train."""
+import io
 import json
 import os
 import shutil
@@ -8,6 +9,7 @@ import tempfile
 import time
 import tomllib
 import unittest
+from contextlib import redirect_stderr
 from pathlib import Path
 from unittest import mock
 
@@ -336,6 +338,22 @@ class CargoAndGremlinsTest(unittest.TestCase):
         self.assertEqual(parsed.killed, 0)
         self.assertEqual(missed_lines(fixture("cargo-mutants", "missed.txt")), [4, 4, 5, 5])  # missed.txt: start only
 
+    def test_cargo_mutants_with_no_mutant_in_the_diff(self):
+        # cargo-mutants 27.1.0 on a comment-only diff: "INFO No mutants to filter", exit 0, no outcomes.json
+        work = Path(tempfile.mkdtemp(prefix="plowline-cargo-"))
+        self.addCleanup(shutil.rmtree, work, ignore_errors=True)
+        source = fixture("cargo-mutants", "lib.rs.txt")
+        engine, out = mutants.CargoMutants(), "INFO No mutants to filter\n"
+        comment = job([mutants.FileScope("src/lib.rs", [(1, 1)])], sources={"src/lib.rs": source})
+        comment.work = work
+        result = mutants.check_coverage(engine.collect(comment, 0, out, None, 0), comment.files, comment.sources)
+        self.assertEqual(result.unavailable, "")
+        code = job([mutants.FileScope("src/lib.rs", [(10, 10)])], sources={"src/lib.rs": source})
+        code.work = work
+        result = mutants.check_coverage(engine.collect(code, 0, out, None, 0), code.files, code.sources)
+        self.assertEqual(result.unavailable, "its report has nothing for src/lib.rs")
+        self.assertIn("exited 0 without a report", engine.collect(code, 0, "something else\n", None, 0).unavailable)
+
     def test_gremlins(self):
         j = job([mutants.FileScope("pkg/cart.go", [(10, 15)])])
         self.assertEqual(mutants.Gremlins().command(j), f"gremlins unleash --diff {mutants.quote('b' * 40)} "
@@ -361,11 +379,124 @@ class CargoAndGremlinsTest(unittest.TestCase):
         self.assertEqual(engine.command(j), f"mut {q('a b.lua')} -r {q('a b.lua:1-2')} {q('a b.lua:5-5')} "
                                             f"-b {q('a;b')} -h {q('h h')} -d {q('scope.diff')} {{unknown}}")
 
-    def test_quoted_arguments_survive_the_shell(self):
-        value = "50% off %PATH% a;b $HOME 'x' \"y\""
-        p = subprocess.run(f"{PY} -c \"import sys; print(sys.argv[1])\" {mutants.quote(value)}", shell=True,
+    def echo(self, value: str) -> str:
+        p = subprocess.run(f"\"{PY}\" -c \"import sys; print(sys.argv[1])\" {mutants.quote(value)}", shell=True,
                            capture_output=True, text=True)
-        self.assertEqual(p.stdout.rstrip("\n"), value, p.stderr)
+        return p.stdout.rstrip("\n") + p.stderr
+
+    def test_quoted_arguments_survive_the_shell(self):
+        for value in ("50% off %PATH% a;b $HOME 'x' & | < >", "C:\\some dir\\", "a\\%b\\\\", "x\\\\\\"):
+            self.assertEqual(self.echo(value), value)
+
+    def test_a_double_quote_is_refused_on_windows(self):
+        value = 'a"&echo PWNED&"b'
+        if os.name == "nt":
+            with self.assertRaisesRegex(mutants.QuoteError, "refusing to quote"):
+                mutants.quote(value)
+            j = job([mutants.FileScope("a.lua", [(1, 1)])], base=value)
+            with self.assertRaises(mutants.QuoteError):
+                mutants.Generic(".lua", "mut {base}").command(j)
+        else:
+            self.assertEqual(self.echo(value), value)
+
+
+class CoverageTest(unittest.TestCase):
+    """A file whose changed lines hold code but got no judged mutant is UNAVAILABLE; a comment-only edit passes."""
+
+    def outcome(self, evaluated):
+        return mutants.Outcome("engine", evaluated=evaluated)
+
+    def test_code_lines(self):
+        rs = "use std::fmt;\n// a comment\n\n/// doc\nfn f() -> u32 {\n    1\n}\n"
+        self.assertEqual(mutants.code_lines("src/a.rs", rs, [(1, 7)]), [5, 6])
+        go = 'import (\n\t"fmt"\n\tlog "log"\n)\n// c\nfunc f() int {\n\treturn 1\n}\n'
+        self.assertEqual(mutants.code_lines("a.go", go, [(1, 8)]), [6, 7])
+        py = "import os\nTIMEOUT = 30\n\n\ndef f(a):\n    # why\n    return a > 0\n"
+        self.assertEqual(mutants.code_lines("a.py", py, [(1, 7)]), [5, 7])  # module level is not mutmut's
+        ts = "import { x } from './x';\nexport { y } from './y';\n/* block\n * more\n */\nconst z = x + 1;\n"
+        self.assertEqual(mutants.code_lines("a.ts", ts, [(1, 6)]), [6])
+        cs = "using System;\nnamespace Shop;\n"
+        self.assertEqual(mutants.code_lines("A.cs", cs, [(1, 2)]), [2])
+        self.assertEqual(mutants.code_lines("a.ts", "", [(3, 4)]), [3, 4])  # source unknown: assume code
+
+    def test_a_comment_only_edit_passes_even_when_the_report_omits_the_file(self):
+        files = [mutants.FileScope("src/lib.rs", [(2, 2)])]
+        out = mutants.check_coverage(self.outcome({}), files, {"src/lib.rs": "fn f() {}\n// tidy\n"})
+        self.assertEqual(out.unavailable, "")
+        self.assertIn("only comments, blank lines or imports changed in src/lib.rs", out.note)
+
+    def test_changed_code_with_no_judged_mutant_is_unavailable(self):
+        files = [mutants.FileScope("a.ts", [(2, 2)])]
+        out = mutants.check_coverage(self.outcome({"a.ts": 0}), files, {"a.ts": "// x\nconst z = x + 1;\n"})
+        self.assertEqual(out.unavailable, "no mutant was judged on the changed code of a.ts (line 2)")
+        out = mutants.check_coverage(self.outcome({}), files, {"a.ts": "// x\nconst z = x + 1;\n"})
+        self.assertEqual(out.unavailable, "its report has nothing for a.ts")
+
+    def test_stryker_ignored_or_uncompiled_mutants_are_not_a_pass(self):
+        report = json.loads(fixture("stryker-js", "mutation.json"))
+        for mutant in report["files"]["src/price.ts"]["mutants"]:
+            loc = mutant["location"]
+            if loc["start"]["line"] <= 3 <= loc["end"]["line"]:  # every mutant touching line 3
+                mutant["status"] = "CompileError" if mutant["mutatorName"] == "BlockStatement" else "Ignored"
+        j = job([mutants.FileScope("src/price.ts", [(3, 3)])],
+                sources={"src/price.ts": fixture("stryker-js", "price.ts.txt")})
+        out = mutants.check_coverage(mutants.Outcome.of("StrykerJS", mutants.parse_stryker_json(json.dumps(report), j)),
+                                     j.files, j.sources)
+        self.assertEqual(out.unavailable, "no mutant was judged on the changed code of src/price.ts (line 3)")
+
+
+class GuardTest(unittest.TestCase):
+    def setUp(self):
+        self.tree = Path(tempfile.mkdtemp(prefix="plowline-guard-")).resolve()
+        self.addCleanup(shutil.rmtree, self.tree, ignore_errors=True)
+        for args in (("init", "-q", "-b", "main"),):
+            subprocess.run(["git", *args], cwd=self.tree, env=ENV, check=True, capture_output=True)
+        (self.tree / "reports" / "mutation").mkdir(parents=True)
+        (self.tree / "reports" / "mutation" / "mutation.json").write_text("committed\n")
+        (self.tree / "src.ts").write_text("one\n")
+        subprocess.run(["git", "add", "-A"], cwd=self.tree, env=ENV, check=True)
+        subprocess.run(["git", "commit", "-qm", "c"], cwd=self.tree, env=ENV, check=True)
+        (self.tree / ".stryker-tmp").mkdir()
+        (self.tree / ".stryker-tmp" / "mine.txt").write_text("mine\n")
+
+    def test_engine_output_is_put_back_and_other_edits_are_kept(self):
+        guard = mutants.TreeGuard(self.tree, mutants.StrykerJS.leftovers)
+        with guard:
+            (self.tree / "reports" / "mutation" / "mutation.json").write_text("engine output\n")
+            (self.tree / ".stryker-tmp").mkdir()
+            (self.tree / ".stryker-tmp" / "sandbox.txt").write_text("engine\n")
+            (self.tree / "src.ts").write_text("edited by a person\n")
+        self.assertEqual((self.tree / "reports" / "mutation" / "mutation.json").read_text(), "committed\n")
+        self.assertEqual(sorted(p.name for p in (self.tree / ".stryker-tmp").iterdir()), ["mine.txt"])
+        self.assertEqual((self.tree / "src.ts").read_text(), "edited by a person\n")
+        self.assertEqual(guard.warnings, ["tracked file(s) changed during the run, left as they are: src.ts"])
+
+    def test_a_failed_move_aside_puts_back_what_it_moved(self):
+        real = Path.rename
+
+        def rename(self_path, target):
+            if self_path.name == ".stryker-tmp":
+                raise PermissionError("a file in it is open")
+            return real(self_path, target)
+        with mock.patch.object(Path, "rename", rename):
+            with self.assertRaisesRegex(mutants.GuardError, "could not move .*stryker-tmp aside"):
+                with mutants.TreeGuard(self.tree, mutants.StrykerJS.leftovers):
+                    self.fail("the engine must not run")
+        self.assertEqual((self.tree / "reports" / "mutation" / "mutation.json").read_text(), "committed\n")
+        self.assertEqual(list(self.tree.rglob("*.plowline-aside")), [])
+
+
+class InterruptTest(unittest.TestCase):
+    def test_a_failed_kill_on_ctrl_c_is_reported(self):
+        proc = mock.Mock(pid=4242)
+        proc.communicate.side_effect = KeyboardInterrupt
+        err = io.StringIO()
+        with mock.patch("subprocess.Popen", return_value=proc), \
+                mock.patch.object(mutants, "kill_tree", return_value="taskkill /T exited 128"), \
+                redirect_stderr(err), self.assertRaises(KeyboardInterrupt):
+            mutants.Runner(60).run("engine --go", Path("."))
+        self.assertIn("the engine may still be running (taskkill /T exited 128); stop it by hand: engine --go",
+                      err.getvalue())
 
 
 def missed_lines(text: str) -> list[int]:
@@ -533,8 +664,9 @@ class EndToEndTest(FakeEngineCase):
         self.assertEqual((self.repo / "mutants" / "keep.txt").read_text(), "mine\n")
         self.assertFalse((self.repo / "mutants.plowline-aside").exists())
 
-    def test_a_tracked_file_the_engine_changes_is_checked_out_again(self):
-        self.write("engine.py", "import pathlib\npathlib.Path('data.json').write_text('overwritten')\n")
+    def test_a_tracked_file_edited_during_the_run_survives(self):
+        # Someone (an editor, an agent, a person) saves data.json while the engine runs: it is theirs, not the engine's.
+        self.write("engine.py", "import pathlib\npathlib.Path('data.json').write_text('edited meanwhile')\n")
         self.write("data.json", "{}\n")
         self.write("app.lua", "a = 1\n")
         self.base = self.commit("engine")
@@ -543,8 +675,18 @@ class EndToEndTest(FakeEngineCase):
         cfg = mutants.config_from({"mutants": {"engines": {"lua": {"command": f'"{PY}" engine.py'}}}})
         r = self.run_mutants(cfg)
         self.assertEqual(r.status, "pass", r.report)
-        self.assertEqual((self.repo / "data.json").read_text(), "{}\n")
-        self.assertIn("checked them out again", r.report)
+        self.assertEqual((self.repo / "data.json").read_text(), "edited meanwhile")
+        self.assertIn("tracked file(s) changed during the run, left as they are: data.json", r.report)
+
+    def test_a_stale_aside_stops_the_run_and_touches_nothing(self):
+        self.write("mutants/mine.txt", "current\n")
+        self.write("mutants.plowline-aside/old.txt", "from a killed run\n")
+        r = self.run_mutants()
+        self.assertEqual(r.status, "unavailable", r.report)
+        self.assertIn("mutants.plowline-aside left by an earlier run that was stopped", r.line)
+        self.assertEqual((self.repo / "mutants" / "mine.txt").read_text(), "current\n")
+        self.assertEqual((self.repo / "mutants.plowline-aside" / "old.txt").read_text(), "from a killed run\n")
+        self.assertFalse(self.log.exists())  # the engine never ran
 
     def test_generic_engine(self):
         self.write("engine.py", GENERIC_ENGINE)
@@ -676,7 +818,9 @@ class CheckCommandTest(RepoCase):
         refused = self.pl("check")
         self.assertEqual(refused.returncode, 2, refused.stdout + refused.stderr)
         self.assertIn("Commit or stash them first, or pass --dirty", refused.stderr)
+        (self.app / "brand-new.txt").write_text("SURVIVOR\n")  # untracked: git diff cannot see it
         dirty = self.pl("check", "--dirty")
+        self.assertIn("not checked (untracked; git add them to include them): brand-new.txt", dirty.stdout)
         self.assertEqual(dirty.returncode, 1, dirty.stdout + dirty.stderr)
         self.assertIn("pl check: the working tree against main", dirty.stdout)
         self.assertIn("notes.txt:2  kept a SURVIVOR line  (no test failed)", dirty.stdout)  # uncommitted line, in scope

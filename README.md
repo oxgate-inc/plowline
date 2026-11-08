@@ -223,10 +223,11 @@ are never mutated; add other test layouts to `skip`.
 A mutant counts against a lane when the lines it changed overlap the lane's
 changed lines: its whole span where the engine reports one (a "replace this
 function's body" mutant covers the body), its line where the engine gives only
-a line. A changed file that the engine's report does not mention at all is
-UNAVAILABLE, never a pass: it usually means a path or module name did not
-match. A file the report covers but with no mutant on its changed lines (a
-comment, a blank line) passes and is named in the report.
+a line. A changed file whose changed lines hold code, but on which the engine
+judged no mutant, is UNAVAILABLE, never a pass: the report left the file out
+(a path or module name did not match), or the engine skipped, ignored or could
+not compile every mutant there. An edit only to comments, blank lines, imports
+or brackets has nothing to mutate; it passes, named in the report.
 
 For any other language, or to replace a built-in engine, name a command for the
 extension:
@@ -258,17 +259,28 @@ arrive quoted. The contract:
 `--base <ref>`). It exits 0 on PASS, 1 on FAIL and 2 when it could not run.
 It refuses a worktree with uncommitted changes, because the engines would test
 code the line numbers don't describe; `pl check --dirty` checks the working
-tree instead, diffing it (tracked files) against the base. `pl check --explain`
+tree instead, diffing it (tracked files) against the base. New files git does
+not track yet are not in that diff: they are listed as "not checked" until you
+`git add` them. `pl check --explain`
 prints the files and line ranges it would mutate and the exact engine commands,
 and runs nothing. On the trunk itself it says `nothing to mutate`. When the
 gate has `builtin:mutants`, `pl new --brief` asks the lane's agent to run
 `pl check` before `pl done`.
 
-A run leaves the tree as it found it: an engine's output folder that was
-already there (`mutants/`, `.stryker-tmp/`, `reports/mutation/mutation.json`)
-is moved aside for the run and put back, what the engine wrote is removed, and
-a tracked file it changed is checked out again. Anything it could not undo is
-named at the end of the report.
+A run leaves the tree as it found it: an engine's output path that was already
+there (`mutants/`, `.stryker-tmp/`, `reports/mutation/mutation.json`,
+`StrykerOutput/`) is renamed to `<name>.plowline-aside` for the run and put
+back afterwards, and what the engine wrote there is removed. Any other tracked
+file that changes during the run is left exactly as it is and named in the
+report: a person or an editor may have saved it. Anything Plowline could not
+undo is named at the end of the report.
+
+If Plowline itself is killed mid-run (the terminal closed, the process ended),
+it cannot clean up. You may find `<name>.plowline-aside` next to where `<name>`
+was: it is your own earlier folder or file. Delete what the engine left at
+`<name>`, rename the aside back, and restore a tracked file with
+`git checkout -- <path>`. Until then the next run stops with UNAVAILABLE and
+names the aside, so nothing is overwritten.
 
 Limits:
 
@@ -288,7 +300,8 @@ Limits:
   that line; in a run that does mutate something, they are listed under
   "not mutated".
 - mutmut mutates function bodies only: a change only to module-level Python
-  code has nothing to mutate. It does not run on Windows outside WSL. For
+  code (constants, top-level statements, class attributes) has nothing to
+  mutate and passes with a note. It does not run on Windows outside WSL. For
   Python, the killed count is per changed function, not per line. A survivor
   whose code appears more than once in its function is placed on the
   function's first line.

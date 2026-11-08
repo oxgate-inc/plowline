@@ -19,13 +19,16 @@
   or unavailable; unavailable ends the gate with `GATE: UNAVAILABLE at step
   i/n`, like a command that was not found. A built-in step that crashes is
   UNAVAILABLE too. Shell steps are unchanged.
-- **Never a quiet pass, never a crash read as red.** A changed file the
-  engine's report does not cover, a mutant status Plowline cannot judge, an
+- **Never a quiet pass, never a crash read as red.** A changed file whose
+  changed code got no judged mutant (left out of the report, or every mutant
+  skipped, ignored or not compiled), a mutant status Plowline cannot judge, an
   engine report it cannot read, or a generic command that exits 1 without
-  listing survivors is UNAVAILABLE. A mutant counts when its span overlaps a
-  changed line (cargo-mutants spans come from `outcomes.json`). An engine's
-  earlier output is moved aside for the run and put back, and tracked files it
-  changed are checked out again.
+  listing survivors is UNAVAILABLE. An edit only to comments, blank lines or
+  imports passes with a note. A mutant counts when its span overlaps a changed
+  line (cargo-mutants spans come from `outcomes.json`). An engine's earlier
+  output is moved aside for the run and put back (a stale aside from a killed
+  run stops the next one); other tracked files changed during a run are left
+  alone and named. A value with a double quote is never passed to cmd.exe.
 - **`pl check [<ref>] [--base <ref>] [--explain] [--dirty]`.** The same check in
   your worktree, with no lane and no train: `HEAD` against its merge-base with
   the trunk by default. Exit 0 pass, 1 fail, 2 unavailable (a crash too). A ref

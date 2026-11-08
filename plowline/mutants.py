@@ -22,6 +22,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import tomllib
@@ -236,12 +237,21 @@ class BudgetExceeded(Exception):
     pass
 
 
+class QuoteError(ValueError):
+    pass
+
+
 def quote(value: str) -> str:
-    """One argument for a shell command line: double quotes for cmd.exe, shlex quoting elsewhere. cmd.exe expands
-    %NAME% even inside quotes, so each % is written outside them, escaped: "a"^%"b"."""
+    """One argument for a shell command line: shlex quoting, or double quotes for cmd.exe. cmd.exe has no escape for
+    a double quote inside quotes, so a value holding one is refused (no path or commit id needs it). It expands
+    %NAME% even inside quotes, so each % is written outside them, escaped: "a"^%"b". A run of backslashes just
+    before a closing quote is doubled, or the program would read the quote as escaped."""
     if os.name != "nt":
         return shlex.quote(value)
-    return '"' + value.replace('"', '\\"').replace("%", '"^%"') + '"'
+    if '"' in value:
+        raise QuoteError(f"refusing to quote {value!r} for cmd.exe: it contains a double quote")
+    value = re.sub(r"(\\+)(?=%|$)", lambda m: m.group(1) * 2, value)
+    return '"' + value.replace("%", '"^%"') + '"'
 
 
 def kill_tree(p: subprocess.Popen) -> str:
@@ -295,7 +305,9 @@ class Runner:
                 self.warnings.append(f"the engine may still be running ({problem}); stop it by hand: {cmd}")
             raise BudgetExceeded()
         except BaseException:  # Ctrl-C: the engine runs in its own group, so stop it here
-            kill_tree(p)
+            problem = kill_tree(p)
+            if problem:
+                print(f"plowline: the engine may still be running ({problem}); stop it by hand: {cmd}", file=sys.stderr)
             raise
         return p.returncode, out or ""
 
@@ -347,19 +359,67 @@ class Outcome:
         return cls(engine, parsed.survivors, parsed.killed, evaluated=parsed.evaluated)
 
 
-def check_coverage(outcome: Outcome, files: list[FileScope]) -> Outcome:
-    """An engine that ran but whose report says nothing about a scoped file did not test it: UNAVAILABLE, not PASS.
-    A covered file with no mutant on its changed lines (a comment, a blank line) is named in a note."""
+C_COMMENTS = ("//", "/*", "*", "*/")
+COMMENT_PREFIXES = {".py": ("#",)}
+IMPORT_LINES = {
+    ".py": re.compile(r"^(import\s|from\s+\S+\s+import\b)"),
+    ".rs": re.compile(r"^(pub(\([^)]*\))?\s+)?use\s"),
+    ".go": re.compile(r"^(import\b|(\w+\s+|[._]\s+)?\"[^\"]*\"$)"),
+    ".cs": re.compile(r"^(global\s+)?using\s+[^(=]*;$|^using\s+\w+\s*=\s*[\w.]+;$"),
+}
+JS_IMPORT = re.compile(r"^(import\s|export\s+(\*|\{[^}]*\}|type\s+\{[^}]*\})\s*from\s)")
+PUNCTUATION_ONLY = re.compile(r"^[{}()\[\];,]*$")
+
+
+def code_lines(path: str, source: str, ranges: list[tuple[int, int]]) -> list[int]:
+    """The changed lines that hold code an engine could mutate: not blank, not a comment, not only an import or
+    brackets. For Python only lines inside a function count (mutmut mutates function bodies only). A line the
+    source does not have counts as code, to stay on the safe side."""
+    ext = Path(path).suffix.lower()
+    lines = lines_of(source)
+    comments = COMMENT_PREFIXES.get(ext, C_COMMENTS)
+    imports = IMPORT_LINES.get(ext, JS_IMPORT)
+    spans = [(s, e) for _, _, s, e in python_functions(source) or []] if ext == ".py" else None
+    out = []
+    for a, b in ranges:
+        for n in range(a, b + 1):
+            if n > len(lines):
+                out.append(n)
+                continue
+            text = lines[n - 1].strip()
+            if not text or PUNCTUATION_ONLY.match(text) or text.startswith(comments) or imports.match(text):
+                continue
+            if spans is not None and not any(s <= n <= e for s, e in spans):
+                continue
+            out.append(n)
+    return out
+
+
+def check_coverage(outcome: Outcome, files: list[FileScope], sources: dict[str, str] | None = None) -> Outcome:
+    """A scoped file whose changed lines hold code but got no judged mutant was not tested: UNAVAILABLE, not PASS,
+    whether the engine's report left the file out (a path or module name mismatch) or skipped, ignored or could not
+    compile its mutants. An edit only to comments, blank lines, imports or brackets passes, named in a note."""
     if outcome.unavailable or outcome.evaluated is None:
         return outcome
-    missing = [f.path for f in files if f.path not in outcome.evaluated]
-    if missing:
-        return Outcome(outcome.engine, unavailable=f"its report has nothing for {', '.join(missing)}",
-                       note=outcome.note)
-    quiet = [f.path for f in files if outcome.evaluated[f.path] == 0]
+    sources = sources or {}
+    problems, quiet = [], []
+    for f in files:
+        judged = outcome.evaluated.get(f.path)
+        if judged:
+            continue
+        code = code_lines(f.path, sources.get(f.path, ""), f.ranges)
+        if not code:
+            quiet.append(f.path)
+        elif judged is None:
+            problems.append(f"its report has nothing for {f.path}")
+        else:
+            shown = ", ".join(map(str, code[:5])) + (" ..." if len(code) > 5 else "")
+            problems.append(f"no mutant was judged on the changed code of {f.path} (line {shown})")
+    if problems:
+        return Outcome(outcome.engine, unavailable="; ".join(problems), note=outcome.note)
     if quiet:
-        outcome.note = "\n".join(filter(None, [outcome.note, f"{outcome.engine}: no mutant on the changed lines of "
-                                                             f"{', '.join(quiet)}"]))
+        outcome.note = "\n".join(filter(None, [outcome.note, f"{outcome.engine}: only comments, blank lines or "
+                                                             f"imports changed in {', '.join(quiet)}"]))
     return outcome
 
 
@@ -814,6 +874,10 @@ class CargoMutants(Engine):
         report = job.work / "mutants.out" / "outcomes.json"
         if code == 4:
             return Outcome(self.name, unavailable="the tests fail before any mutation (exit 4)", note=tail(out))
+        if code == 0 and not report.exists() and "No mutants to filter" in out:
+            # cargo-mutants 27 found no mutant in the diff and wrote no report: an empty report, judged by
+            # check_coverage (a comment-only edit passes, changed code without mutants does not)
+            return Outcome.of(self.name, Parsed())
         if code not in (0, 2, 3) or not report.exists():
             return self.no_report(code, out)
         return Outcome.of(self.name, parse_cargo_outcomes(report.read_text(encoding="utf-8"), job))
@@ -1003,7 +1067,7 @@ def write_job(tree: Path, scope: Scope, files: list[FileScope], work: Path, n: i
     sources = {}
     for f in files:
         try:
-            sources[f.path] = ((tree / f.path).read_text(encoding="utf-8", errors="replace")
+            sources[f.path] = ((tree / f.path).read_bytes().decode("utf-8", errors="replace")
                                if scope.head == WORKTREE else git(tree, "show", f"{scope.head}:{f.path}"))
         except (ScopeError, OSError):
             sources[f.path] = ""
@@ -1018,10 +1082,20 @@ def tracked_changes(tree: Path) -> set[str]:
         return set()
 
 
+class GuardError(Exception):
+    """The tree is not in a state an engine can safely run in; nothing was changed."""
+
+
+def under(path: str, roots: tuple[str, ...]) -> bool:
+    return any(path == r or path.startswith(r.rstrip("/") + "/") for r in roots)
+
+
 class TreeGuard:
     """Leaves the tree as the engine found it, so `pl done` still sees a clean worktree and old results never enter
-    a report: the engine's output folders that already exist are moved aside first and put back afterwards, what
-    the engine wrote is removed, and a tracked file it changed is checked out again."""
+    a report. The engine's output paths that already exist are moved aside (`<name>.plowline-aside`) for the run and
+    put back afterwards, and what the engine wrote there is removed. A tracked file under those paths that changed is
+    checked out again; any other tracked file that changed during the run is left alone and named in a warning,
+    because a person or an editor may have changed it."""
 
     def __init__(self, tree: Path, leftovers: tuple[str, ...]):
         self.tree, self.leftovers = tree, leftovers
@@ -1030,22 +1104,39 @@ class TreeGuard:
         self.existing: set[Path] = set()
 
     def __enter__(self) -> "TreeGuard":
+        stale = [self.aside(self.tree / rel) for rel in self.leftovers if self.aside(self.tree / rel).exists()]
+        if stale:
+            raise GuardError(f"{', '.join(str(s) for s in stale)} left by an earlier run that was stopped; move it "
+                             "back without the .plowline-aside suffix (or delete it), then run again")
         self.dirty = tracked_changes(self.tree)
-        for rel in self.leftovers:
-            p = self.tree / rel
-            parent = p.parent
-            while parent != self.tree and parent != parent.parent:
-                if parent.exists():
-                    self.existing.add(parent)
-                parent = parent.parent
-            if p.exists():
-                aside = p.with_name(p.name + ".plowline-aside")
-                if aside.exists():
-                    self.warnings.append(f"{aside} is left from an earlier run; move it back to {p} by hand")
-                    continue
-                p.rename(aside)
-                self.moved.append((p, aside))
+        try:
+            for rel in self.leftovers:
+                p = self.tree / rel
+                parent = p.parent
+                while parent != self.tree and parent != parent.parent:
+                    if parent.exists():
+                        self.existing.add(parent)
+                    parent = parent.parent
+                if p.exists():
+                    p.rename(self.aside(p))
+                    self.moved.append((p, self.aside(p)))
+        except OSError as e:
+            self.put_back()
+            raise GuardError(f"could not move {p} aside before the run ({e}); nothing was changed")
         return self
+
+    @staticmethod
+    def aside(p: Path) -> Path:
+        return p.with_name(p.name + ".plowline-aside")
+
+    def put_back(self) -> None:
+        for p, aside in reversed(self.moved):
+            try:
+                p.parent.mkdir(parents=True, exist_ok=True)
+                aside.rename(p)
+            except OSError as e:
+                self.warnings.append(f"could not put {p} back (it is at {aside}): {e}")
+        self.moved = []
 
     def __exit__(self, *exc) -> None:
         for rel in self.leftovers:
@@ -1061,19 +1152,27 @@ class TreeGuard:
                     and not any(parent.iterdir()):
                 parent.rmdir()
                 parent = parent.parent
-        for p, aside in self.moved:
-            try:
-                p.parent.mkdir(parents=True, exist_ok=True)
-                aside.rename(p)
-            except OSError as e:
-                self.warnings.append(f"could not put {p} back (it is at {aside}): {e}")
+        self.put_back()
         changed = sorted(tracked_changes(self.tree) - self.dirty)
-        if changed:
+        ours = [p for p in changed if under(p, self.leftovers)]
+        others = [p for p in changed if p not in ours]
+        if ours:
             try:
-                git(self.tree, "checkout", "--", *changed)
-                self.warnings.append(f"the engine changed tracked file(s) {', '.join(changed)}; checked them out again")
+                git(self.tree, "checkout", "--", *ours)
+                self.warnings.append(f"the engine changed tracked file(s) {', '.join(ours)}; checked them out again")
             except ScopeError as e:
-                self.warnings.append(f"the engine changed tracked file(s) {', '.join(changed)}: {e}")
+                self.warnings.append(f"the engine changed tracked file(s) {', '.join(ours)}: {e}")
+        if others:
+            self.warnings.append(f"tracked file(s) changed during the run, left as they are: {', '.join(others)}")
+
+
+def untracked_sources(tree: Path, cfg: Config) -> list[str]:
+    """New files `git diff` cannot see, that an engine would otherwise have mutated."""
+    try:
+        listed = git(tree, "ls-files", "--others", "--exclude-standard", "-z").split("\0")
+    except ScopeError:
+        return []
+    return sorted(p for p in listed if p and not is_test_file(p) and engine_for(Path(p).suffix, cfg) is not None)
 
 
 def skipped_summary(scope: Scope) -> str:
@@ -1107,10 +1206,12 @@ def run(tree: Path, base: str, head: str, cfg: Config | None = None, env: dict |
             guard = TreeGuard(tree, engine.leftovers)
             try:
                 with guard:
-                    outcomes.append(check_coverage(engine.execute(job, runner), files))
+                    outcomes.append(check_coverage(engine.execute(job, runner), files, job.sources))
             except BudgetExceeded:
                 over_budget = True
                 break
+            except (GuardError, QuoteError) as e:
+                outcomes.append(Outcome(engine.name, unavailable=str(e)))
             except Exception as e:  # a report Plowline could not read is not proof against any lane
                 outcomes.append(Outcome(engine.name, unavailable=f"crashed: {type(e).__name__}: {e}"))
             finally:
@@ -1122,6 +1223,10 @@ def run(tree: Path, base: str, head: str, cfg: Config | None = None, env: dict |
     not_mutated = [f"{path} ({why})" for path, why in scope.skipped if why != "test file"]
     if not_mutated:
         warnings.append(f"not mutated: {', '.join(not_mutated)}")
+    if head == WORKTREE:
+        untracked = untracked_sources(tree, cfg)
+        if untracked:
+            warnings.append(f"not checked (untracked; git add them to include them): {', '.join(untracked)}")
     return verdict(scope, cfg, outcomes, over_budget, warnings + runner.warnings)
 
 
@@ -1170,7 +1275,11 @@ def explain(tree: Path, base: str, head: str, cfg: Config | None = None) -> str:
             job = write_job(tree, scope, files, work, n)
             why = engine.available(tree)
             out.append(f"{engine.name}: {', '.join(f.path for f in files)}")
-            cmd = engine.command(job)
+            try:
+                cmd = engine.command(job)
+            except QuoteError as e:
+                out.append(f"  unavailable here: {e}")
+                continue
             out.append(f"  run: {cmd}" if cmd else "  run: nothing (no changed function: mutmut mutates function bodies)")
             if why:
                 out.append(f"  unavailable here: {why}")
