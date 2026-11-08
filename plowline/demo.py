@@ -69,7 +69,10 @@ def run(say=print) -> dict:
         pl("done", name)
 
     say("# One train: merge every candidate onto main, run the gate once, push once.\n"
-        "# d conflicts with c and e breaks the gate, so both bounce. a, b and c still land.\n")
+        "# d conflicts with c, so it bounces before the gate. e turns the gate red: the train
+"
+        "# splits until it finds e, bounces it with the gate output, and a, b and c still land.
+")
     pl("train")
     pl("status")
 
