@@ -1,10 +1,15 @@
 [plowline]
 trunk = "main"
 remote = "origin"
-gate = "python -m pytest -q"     # must pass on the merged train before anything is pushed
+gate = "python -m pytest -q"     # must pass on the merged train; or a list: ["ruff check .", "python -m pytest -q"]
 review = "builtin:claude"        # "builtin:codex", any command (exit 0 = GO), or "" for none
 regenerate = ""                  # optional: rebuild generated files on the merged tree
+generated = []                   # files regenerate rebuilds, e.g. ["package-lock.json"]; a conflict only there takes the trunk's side
+agent = "claude"                 # what `pl open` starts; with {lane}, {path} or {notice} it also repairs bounced lanes
+repair_attempts = 2              # automatic repairs per lane before "split this lane or re-plan"
 land = "push"                    # "push" to the trunk, or "pr": open one pull request per train
 on_land = ""                     # optional: runs after each landing (deploy, tag, notify)
+strict_paths = false             # true: a lane that changes files outside its --paths bounces at pl done
+max_lanes = 0                    # cap on lanes not yet landed; 0 for no cap
 worktrees = "../{repo}-lanes"    # where lane worktrees live
 env = ""                         # "stanchion" gives each lane its own database and ports; "off" turns it off

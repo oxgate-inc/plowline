@@ -56,16 +56,17 @@ rules to `AGENTS.md` and `CLAUDE.md`, so the agent in each lane knows how to beh
 ## A working session
 
 **1. Pick 2–4 lanes.** Good lanes are small (an hour or two of agent work) and
-touch different files. Write a short brief for each by copying `briefs/TEMPLATE.md`:
-the goal, the files, and how you'll know it's done.
+touch different files. `pl new <lane> --brief` writes `briefs/<lane>.md` for you to
+fill in: the goal, the files it may and may not touch, how you'll know it's done,
+and the report block the agent ends with.
 
 **2. Start them.** Each command creates the worktree and opens a new terminal
 with your agent already told to read its brief:
 
 ```bash
-pl new login  --paths src/auth/        --brief briefs/login.md  --open
-pl new limits --paths src/api/limits.py --brief briefs/limits.md --open
-pl new docs   --paths docs/             --brief briefs/docs.md   --open
+pl new login  --paths src/auth/        --brief --open
+pl new limits --paths src/api/limits.py --brief --open
+pl new docs   --paths docs/             --brief --open --after login   # lands after login
 ```
 
 If two lanes claim the same files you'll see an overlap warning. That's
@@ -101,7 +102,10 @@ pl clean      # removes landed worktrees and branches
 ## When a lane bounces
 
 A lane bounces when it conflicts with something that landed first, or when the
-combined tests go red. The other lanes still land. `pl watch` shows the reason.
+combined tests go red. When the tests go red, Plowline splits the train until it
+finds the lane that broke them, so only that lane bounces and the others still
+land. `pl watch` shows the reason, and the full story (conflicting files, the
+test output, what to do) is in `.plowline/notices/<lane>.md`.
 Go to that lane's terminal and tell the agent:
 
 > Your lane bounced. Run `pl resume <lane>` and fix it.
@@ -129,7 +133,13 @@ away in its own terminal and fixes them.
 | You see | Do |
 |---|---|
 | `pl open` printed a command instead of opening a terminal | No supported terminal was found. Paste the command into a new terminal. |
-| `lane ... has uncommitted changes; commit them first` | The agent stopped before committing. Ask it to commit, then run `pl done` again. |
+| `lane ... has uncommitted changes in ...` and a file list | The agent stopped before committing. Ask it to commit, then run `pl done` again. |
+| `warning: N file(s) outside the claim` | The lane touched files outside `--paths`. Fine if intended; otherwise ask the agent to move them out. |
+| `STALE_REVIEW` | The lane got new commits after its GO. Run `pl done <lane>` to review the new head. |
+| `GATE_RED_ON_TRUNK` | Your main is red without any lane. Fix main first; no lane was blamed. |
+| `<lane> waits for <other> to land` | The lane was started with `--after <other>`. It joins the next train after that one lands. |
+| A lane shows as `parked` | Its worktree folder was deleted. `pl done` prints the command to recreate it. |
+| `follow-ups: N` in `pl status` | Non-blocking review findings, in `.plowline/followups.md`. Good material for the next lanes. |
 | `push refused (did origin/main move?)` | Someone pushed to main during the train. `pl watch` retries on its next refresh. |
 | `...has uncommitted changes on main` (local-only) | Commit or stash in the control-tower checkout. |
 | `another train holds .../train.lock` | Another `pl train` or `pl watch` is running. If none is, delete the lock file. |
