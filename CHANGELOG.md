@@ -28,6 +28,14 @@
   `PLOWLINE_BASE`, `PLOWLINE_HEAD` and `PLOWLINE_LANES`. `builtin:<name>` steps
   are reserved for checks that ship with Plowline (`builtin:mutants` in 0.3).
 
+- **`pl train --full-steam`** (alias `--watch`): a train whenever lanes are
+  done, checked every `--every N` seconds (default 30), one line per cycle, a
+  heartbeat every ten minutes when idle, `--until-empty` to stop when no lane is
+  left in play. Crashed cycles go to `.plowline/logs/train.log`; five in a row
+  stop the loop. Ctrl-C during a cycle finishes that cycle first. The train lock
+  moved to `.plowline/train.lock`, and full steam removes a lock older than
+  `--cycle-timeout`.
+
 ### Lanes
 
 - **Scope check at `pl done`.** Changed files are measured from the merge-base

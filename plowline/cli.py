@@ -98,6 +98,11 @@ class YardError(Exception):
     pass
 
 
+class LockBusy(YardError):
+    """Another train (or full-steam loop) holds the lock: wait, it is not a failure."""
+
+
+
 def git(*args: str, cwd: Path, check: bool = True) -> str:
     p = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace")
     if check and p.returncode != 0:
@@ -117,7 +122,7 @@ def git_ok(*args: str, cwd: Path) -> bool:
 
 def shell(cmd: str, cwd: Path, env: dict | None = None) -> tuple[bool, str]:
     p = subprocess.run(cmd, cwd=cwd, shell=True, capture_output=True, text=True, encoding="utf-8", errors="replace",
-                       env={**os.environ, **(env or {})})
+                       env={**os.environ, **(env or {})}, **gates.child_group())
     return p.returncode == 0, (p.stdout + p.stderr).strip()
 
 
@@ -180,6 +185,7 @@ class Yard:
         self.cfg = dict(DEFAULTS)
         self.stanchion: dict | None = None  # the [stanchion] table: lane environments through Stanchion
         self._git_version: tuple[int, int] | None = None
+        self.events: list[tuple[str, str, str]] = []  # (landed|bounced, branch, reason) for full steam's line
         cfg_file = self.root / CONFIG_NAME
         if cfg_file.exists():
             with cfg_file.open("rb") as f:
@@ -254,19 +260,31 @@ class Yard:
         return lane.brief
 
     @contextmanager
-    def lock(self):
-        self.state_dir.mkdir(parents=True, exist_ok=True)
-        path = self.state_dir / "train.lock"
+    def lock(self, name: str = "train.lock", what: str = "train", stale_after: float | None = None):
+        """An exclusive lock file in .plowline/. With stale_after, an older lock is reported and removed."""
+        self.notes.mkdir(parents=True, exist_ok=True)
+        path = self.notes / name
         try:
             fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         except FileExistsError:
-            age = time.time() - path.stat().st_mtime
-            hint = " (it looks stale; delete it if no train is running)" if age > LOCK_STALE_SECONDS else ""
-            raise YardError(f"another train holds {path}{hint}")
+            try:
+                age = time.time() - path.stat().st_mtime
+            except FileNotFoundError:
+                age = 0.0
+            if stale_after is None or age <= stale_after:
+                hint = (" (it looks stale; delete it if no train is running)"
+                        if stale_after is None and age > LOCK_STALE_SECONDS else "")
+                raise LockBusy(f"another {what} holds {path}{hint}")
+            print(f"removed a stale {what} lock {path} ({int(age)}s old, past the {int(stale_after)}s cycle timeout)")
+            path.unlink(missing_ok=True)
+            try:
+                fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            except FileExistsError:
+                raise LockBusy(f"another {what} holds {path}")
         try:
             os.write(fd, str(os.getpid()).encode())
             os.close(fd)
-            yield
+            yield path
         finally:
             path.unlink(missing_ok=True)
 
@@ -479,6 +497,7 @@ def bounce(y: Yard, lane: Lane, reason: str, detail: str, *, paths: list[str] | 
                  + (f"\n{tail(output)}" if output.strip() else ""))
     notice = write_notice(y, lane, reason, detail, paths, path_label, output, fix)
     y.save(lane)
+    y.events.append(("bounced", lane.branch, reason))
     y.log(lane.name, f"bounced: {lane.note.splitlines()[0]}")
     print(f"bounced {lane.name}: {lane.note.splitlines()[0]}")
     print(f"  notice: {notice}")
@@ -920,6 +939,7 @@ def settle_pr(y: Yard) -> bool:
             lane.state, lane.note = "landed", f"landed in {commit} via {pr['url']}"
             y.save(lane)
             y.log(lane.name, f"landed in {commit} via {pr['url']}")
+            y.events.append(("landed", lane.branch, ""))
             y.lane_env("down", lane)
         print(f"train PR merged: landed {len(lanes)} lane(s) at {commit[:9]}")
         y.after_land(lanes, commit, pr["url"])
@@ -998,6 +1018,13 @@ class GateUnavailable(Exception):
 
 
 def cmd_train(y: Yard, a) -> int:
+    if a.full_steam:
+        return full_steam(y, a)
+    return run_train(y, dry_run=a.dry_run)
+
+
+def run_train(y: Yard, dry_run: bool = False, stale_after: float | None = None) -> int:
+    """One train: merge the candidates, gate (bisecting on red), land once, bounce the rest."""
     steps = y.gate_steps()
     if not steps:
         raise YardError("set `gate` in plowline.toml first")
@@ -1006,7 +1033,7 @@ def cmd_train(y: Yard, a) -> int:
     pr_mode = y.cfg["land"] == "pr"
     if pr_mode and not y.has_remote():
         raise YardError("land = \"pr\" needs a remote")
-    with y.lock():
+    with y.lock(stale_after=stale_after):
         if pr_mode and settle_pr(y):
             return 0
         cands = train_candidates(y)
@@ -1047,7 +1074,7 @@ def cmd_train(y: Yard, a) -> int:
                 print("nothing landed")
                 return 1
             head = git("rev-parse", "HEAD", cwd=scratch)
-            if a.dry_run:
+            if dry_run:
                 print(f"dry run: would {'open a PR for' if pr_mode else 'push'} {head[:9]} to {base_ref}")
                 return 0
             if pr_mode:
@@ -1064,6 +1091,7 @@ def cmd_train(y: Yard, a) -> int:
                 lane.state, lane.note = "landed", f"landed in {head}"
                 y.save(lane)
                 y.log(lane.name, f"landed in {head}")
+                y.events.append(("landed", lane.branch, ""))
                 y.lane_env("down", lane)
             print(f"landed {len(green)} lane(s) on {base_ref} at {head[:9]}")
             hook_ok = y.after_land(green, head)
@@ -1228,6 +1256,117 @@ def cmd_clean(y: Yard, a) -> int:
     return 0
 
 
+REASONS = {"GATE_FAIL": "gate red", "MERGE_CONFLICT": "conflict", "OUT_OF_SCOPE": "out of scope",
+           "PR_CLOSED": "PR closed"}
+FULL_STEAM_FAILURES = 5  # consecutive failed cycles before the loop stops
+HEARTBEAT_SECONDS = 600
+
+
+def train_ready(y: Yard) -> bool:
+    """A lane is done and free to ride: a candidate not waiting on --after, or a proposed lane in PR mode."""
+    return any(l.state == "proposed" or (l.state == "candidate" and not y.waiting_on(l)) for l in y.lanes())
+
+
+def lane_counts(y: Yard) -> dict[str, int]:
+    """Lanes still in play: working (active, done or proposed) and bounced. Landed and parked lanes don't count."""
+    counts = {"working": 0, "bounced": 0}
+    for lane in y.lanes():
+        if lane.state == "landed" or y.parked(lane):
+            continue
+        counts["bounced" if lane.state == "bounced" else "working"] += 1
+    return counts
+
+
+def train_cycle(y: Yard, stale_after: float) -> list[str]:
+    """One full-steam cycle: a train whose own output goes to .plowline/logs/train.log. Returns the lines to
+    print (any stale-lock notice, then the summary). Raises on a failed cycle; LockBusy while another train runs."""
+    import io
+    from contextlib import redirect_stdout
+    y.events.clear()
+    buf = io.StringIO()
+    try:
+        with redirect_stdout(buf):
+            run_train(y, stale_after=stale_after)
+    finally:
+        log = y.notes / "logs" / "train.log"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        with log.open("a", encoding="utf-8") as f:
+            f.write(f"--- cycle {time.strftime('%Y-%m-%d %H:%M:%S')}\n{buf.getvalue()}")
+    notes = [line for line in buf.getvalue().splitlines() if line.startswith("removed a stale")]
+    landed = [e for e in y.events if e[0] == "landed"]
+    bounced = [e for e in y.events if e[0] == "bounced"]
+    why = f" ({', '.join(f'{b}: {REASONS.get(r, r.lower())}' for _, b, r in bounced)})" if bounced else ""
+    working = lane_counts(y)["working"]
+    return notes + [f"{len(landed)} landed, {len(bounced)} bounced{why}, {working} working"]
+
+
+def full_steam(y: Yard, a) -> int:
+    """`pl train --full-steam`: check every --every seconds and run one train whenever lanes are done.
+
+    One line per cycle and a heartbeat every ten minutes when idle. Ctrl-C while waiting stops at once; Ctrl-C
+    during a cycle lets that cycle finish its merge, landing or rollback first, so the trunk is never left
+    half-landed. A failed cycle is logged to .plowline/logs/train.log; five in a row stop the loop."""
+    import signal
+    import traceback
+    every, timeout = max(1, a.every), max(1, a.cycle_timeout)
+
+    def stamp() -> str:
+        return time.strftime("%H:%M:%S")
+
+    with y.lock("full-steam.lock", "full-steam loop", stale_after=timeout) as lock_path:
+        print(f"full steam: a train whenever lanes are done, checked every {every}s. Ctrl-C to stop.")
+        failures, last_line = 0, time.monotonic()
+        gates.isolate_children(True)
+        try:
+            while True:
+                if train_ready(y):
+                    interrupted: list[bool] = []
+                    previous = signal.signal(signal.SIGINT, lambda *_: interrupted.append(True))
+                    try:
+                        lines = train_cycle(y, timeout)
+                    except LockBusy as e:
+                        print(f"{stamp()}  waiting: {e}")
+                    except Exception as e:  # a crash in one cycle must not stop the loop
+                        failures += 1
+                        log = y.notes / "logs" / "train.log"
+                        log.parent.mkdir(parents=True, exist_ok=True)
+                        with log.open("a", encoding="utf-8") as f:
+                            f.write(f"cycle failed ({failures}/{FULL_STEAM_FAILURES}):\n{traceback.format_exc()}\n")
+                        first = (str(e).strip().splitlines() or [type(e).__name__])[0]
+                        print(f"{stamp()}  cycle failed ({failures}/{FULL_STEAM_FAILURES}): {first}")
+                        if failures >= FULL_STEAM_FAILURES:
+                            print(f"full steam stopped after {failures} failed cycles in a row (log: {log}). "
+                                  f"Last error: {type(e).__name__}: {str(e).strip()}")
+                            return 2
+                    else:
+                        failures = 0
+                        for note in lines[:-1]:
+                            print(f"{stamp()}  {note}")
+                        print(f"{stamp()}  {lines[-1]}, next check in {every}s")
+                    finally:
+                        signal.signal(signal.SIGINT, previous)
+                    last_line = time.monotonic()
+                    if interrupted:
+                        print("full steam stopped (Ctrl-C) after finishing the cycle")
+                        return 0
+                elif time.monotonic() - last_line >= HEARTBEAT_SECONDS:
+                    counts = lane_counts(y)
+                    print(f"{stamp()}  idle: {counts['working']} working, {counts['bounced']} bounced, "
+                          f"next check in {every}s")
+                    last_line = time.monotonic()
+                if a.until_empty and not any(lane_counts(y).values()):
+                    print(f"{stamp()}  no lane is working, done or bounced: full steam stopped")
+                    return 0
+                os.utime(lock_path)  # a live loop's lock never looks stale
+                try:
+                    time.sleep(every)
+                except KeyboardInterrupt:
+                    print("full steam stopped")
+                    return 0
+        finally:
+            gates.isolate_children(False)
+
+
 def cmd_watch(y: Yard, a) -> int:
     """A control tower for one terminal: lane status, and a train whenever a lane becomes a candidate."""
     import io
@@ -1240,7 +1379,7 @@ def cmd_watch(y: Yard, a) -> int:
                 buf = io.StringIO()
                 with redirect_stdout(buf):
                     try:
-                        cmd_train(y, argparse.Namespace(dry_run=False))
+                        run_train(y)
                     except YardError as e:
                         print(f"train stopped: {e}")
                 stamp = time.strftime("%H:%M:%S")
@@ -1302,6 +1441,13 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--no-review", action="store_true")
     p = sub.add_parser("train", help="merge candidates onto the trunk, gate once, push once")
     p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--full-steam", "--watch", dest="full_steam", action="store_true",
+                   help="keep going: run a train whenever lanes are done, until Ctrl-C")
+    p.add_argument("--every", type=int, default=30, help="full steam: seconds between checks (default 30)")
+    p.add_argument("--until-empty", action="store_true",
+                   help="full steam: stop once no lane is working, done or bounced")
+    p.add_argument("--cycle-timeout", type=int, default=LOCK_STALE_SECONDS,
+                   help="full steam: a lock older than this many seconds is stale (default 7200)")
     p = sub.add_parser("resume", help="reopen a bounced lane and print its notice")
     p.add_argument("name")
     sub.add_parser("clean", help="remove worktrees and branches of landed lanes")

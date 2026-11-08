@@ -80,7 +80,7 @@ worktree with uncommitted changes, copies untracked `.env*` files to
 | `pl open <lane>` | New terminal with the agent running in that lane. `--print` to only show the command. |
 | `pl show <lane>` | The lane's brief, its overlaps and its latest note. |
 | `pl done <lane>` | Check scope, review the lane; on GO it waits for the next train. |
-| `pl train` | Merge candidates, gate once, push once (or open one PR). |
+| `pl train` | Merge candidates, gate once, push once (or open one PR). `--full-steam` keeps going until Ctrl-C. |
 | `pl watch` | Control tower: live status, and a train whenever a lane is done. |
 | `pl status` | Lanes, states, claims, overlaps, dependencies and the follow-up count. |
 | `pl resume <lane>` | Reopen a bounced lane and print its notice. |
@@ -245,6 +245,21 @@ worktree.
    the PR). If the trunk moved underneath, nothing is marked landed. Run the
    train again.
 6. Run `on_land` if set.
+
+### Full steam
+
+Hitch the ox and walk away: `pl train --full-steam` (or `--watch`) checks every
+30 seconds (`--every N`) and runs one train whenever lanes are done, with
+everything above (preview, gate, bisection, landing, notices, auto-repair) and
+`max_lanes` and `repair_attempts` as configured. It prints one line per train,
+`14:02:11  2 landed, 1 bounced (lane/b: gate red), 3 working, next check in 30s`,
+stays quiet when idle except for a heartbeat every ten minutes, and sends the
+train's own output to `.plowline/logs/train.log`. A lock in `.plowline/` keeps two
+trains from running at once (a lock older than `--cycle-timeout` is reported and
+removed), a cycle that crashes is logged and the loop carries on until five fail
+in a row, `--until-empty` stops it once no lane is working, done or bounced, and
+Ctrl-C mid-train lets the train finish its landing or rollback before the loop
+stops, so the trunk is never left half-landed.
 
 ### Train bisection
 

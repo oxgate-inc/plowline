@@ -20,6 +20,20 @@ from typing import Callable
 NOT_FOUND = {127, 9009}  # sh and cmd.exe exit codes for "command not found"
 NOT_RECOGNIZED = "is not recognized as an internal or external command"  # cmd.exe exits 1 with this line
 COMING = {"mutants": "0.3"}
+_ISOLATED = [False]
+
+
+def isolate_children(on: bool) -> None:
+    """Full steam: run gates, regenerate and on_land in their own process group, so a Ctrl-C at the terminal
+    reaches Plowline alone and the running cycle finishes, instead of a killed gate reading as a red one.
+    Plain `pl train` leaves it off, so Ctrl-C stops the gate's whole process tree as it always did."""
+    _ISOLATED[0] = on
+
+
+def child_group() -> dict:
+    if not _ISOLATED[0]:
+        return {}
+    return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt" else {"start_new_session": True}
 
 
 @dataclass
@@ -77,7 +91,7 @@ def run_gate(steps: list[str], ctx: GateContext) -> GateResult:
         else:
             try:
                 p = subprocess.run(step, shell=True, cwd=ctx.tree, capture_output=True, text=True,
-                                   encoding="utf-8", errors="replace", env=env)
+                                   encoding="utf-8", errors="replace", env=env, **child_group())
             except OSError as e:
                 return GateResult("unavailable", f"GATE: UNAVAILABLE at {label}: {e}", "\n".join(outputs))
             code, out = p.returncode, (p.stdout + p.stderr)
