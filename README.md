@@ -14,6 +14,15 @@ anything else that edits files.
   to its own worktree with a notice. The other lanes still land.
 - **No rebases.** The commits that were reviewed are the commits that ship.
 
+### What 0.3 adds
+
+- **`builtin:mutants`, a mutation test of the change.** Put it last in `gate`:
+  the train mutates only the lines its lanes added or changed and bounces a
+  lane whose tests pass without noticing a change to its own code. It uses the
+  mutation engine you already have for your language (see [Mutants](#mutants)).
+- **`pl check`.** The same check on any branch, with no lane and no train.
+  `--explain` prints what it would mutate and the exact engine commands.
+
 ### What 0.2 adds
 
 - **Train bisection.** A red train is split until the merged set is green.
@@ -85,7 +94,8 @@ worktree with uncommitted changes, copies untracked `.env*` files to
 | `pl status` | Lanes, states, claims, overlaps, dependencies and the follow-up count. |
 | `pl resume <lane>` | Reopen a bounced lane and print its notice. |
 | `pl clean` | Remove worktrees and branches of landed lanes; back up `.env` files first. |
-| `pl demo` | Five lanes and two trains in a throwaway repo. `--keep` to look around after. |
+| `pl check [<ref>]` | Mutation-test the lines a branch changed (the `builtin:mutants` check). `--base <ref>`, `--explain`. |
+| `pl demo` | Five lanes, two trains and a `pl check` in a throwaway repo. `--keep` to look around after. |
 
 <p align="center"><img src="docs/train-run.png" alt="A train run: three lanes land, a conflict and a red gate bounce" width="100%"></p>
 
@@ -165,9 +175,86 @@ Every gate run ends with one line: `GATE: PASS`, `GATE: FAIL at step 2/3 ...` or
 itself. A command that could not start at all (not found) is UNAVAILABLE, not
 red: a red result is not proof the check ran, so the train blames no lane, stops,
 and leaves the candidates as they were. Each step gets `PLOWLINE_BASE`,
-`PLOWLINE_HEAD` and `PLOWLINE_LANES`. A step written `builtin:<name>` is reserved
-for checks that ship with Plowline; the first, a diff-scoped mutation test
-(`builtin:mutants`), is planned for 0.3.
+`PLOWLINE_HEAD` and `PLOWLINE_LANES`. A step written `builtin:<name>` runs a
+check that ships with Plowline instead of a command. There is one so far,
+`builtin:mutants`.
+
+### Mutants
+
+A test suite can pass without testing the code it covers: a reversed condition
+survives when every test happens to use a case where both branches agree.
+`builtin:mutants` changes the lines the train added or changed on purpose
+(`<` to `<=`, `not x` to `x`, a call removed), runs your tests against each
+change, and reports every change no test noticed. More survivors than
+`max_survivors` (default 0) turn the gate red, and bisection bounces the lane
+whose lines they are on, with each survivor in its notice.
+
+```toml
+gate = ["npm run lint", "npm test", "builtin:mutants"]
+```
+
+Put it last: it is the slowest step, and it only means something once the tests
+pass. Each survivor is one line in the gate output and the bounce notice:
+
+```text
+MUTANTS: FAIL (1 survivor on 1 changed line)
+tasks/counter.py:3  removed not  (no test failed)
+```
+
+The mutating is done by the engine for each language, which you install. Files
+are matched by extension:
+
+| Engine | Languages | Install | How it is scoped |
+|---|---|---|---|
+| [mutmut](https://mutmut.readthedocs.io/) 3 | Python | `pip install mutmut` (Linux, macOS, or WSL on Windows) | runs only the changed functions' mutants (`mutmut run "<module>.x_<function>__mutmut_*"`); Plowline keeps the ones on changed lines |
+| [StrykerJS](https://stryker-mutator.io/docs/stryker-js/introduction/) | JavaScript, TypeScript | `npm install --save-dev @stryker-mutator/core` and your test runner's plugin | `--mutate "src/x.ts:5-7,..."`: the changed line ranges |
+| [Stryker.NET](https://stryker-mutator.io/docs/stryker-net/introduction/) | C# | `dotnet tool install dotnet-stryker` | `--since:<base>`: the changed files; Plowline keeps the survivors on changed lines |
+| [cargo-mutants](https://mutants.rs/) | Rust | `cargo install --locked cargo-mutants` | `--in-diff <the train's diff>` |
+| [Gremlins](https://gremlins.dev/) | Go | `go install github.com/go-gremlins/gremlins/cmd/gremlins@latest` | `--diff <base>`; Plowline keeps the survivors on changed lines |
+
+Each engine reads its own configuration as usual (`[tool.mutmut]` in
+`pyproject.toml`, `stryker.config.json`, `stryker-config.json`,
+`.cargo/mutants.toml`, `.gremlins.yaml`). Test files (`test_*.py`, `*_test.*`,
+`*.test.*`, `*.spec.*`, anything under `tests/`, `test/` or `__tests__/`),
+`generated` files and `skip` globs are never mutated. For any other language,
+or to replace a built-in engine, name a command for the extension:
+
+```toml
+[mutants]
+max_survivors = 0     # survivors on changed lines a train may keep
+budget = 600          # seconds for all engines in one run
+skip = ["src/legacy/**", "*.pb.go"]   # never mutated; same globs as --paths
+
+[mutants.engines.kt]
+command = "python tools/mutate_kotlin.py {ranges}"
+```
+
+The command runs at the root of the merged tree with `{files}` (the changed
+files), `{ranges}` (`file:a-b` for each changed range), `{base}`, `{head}` and
+`{diff}` (a file holding the train's diff) filled in; write them bare, they
+arrive quoted. Exit 0 means no survivors and exit 1 means survivors: its output
+is the report, and lines like `path:line what` are listed as survivors. Any
+other exit code, or a command that is not found, is UNAVAILABLE.
+
+`pl check` runs the same check in your worktree, with no lane and no train: on
+`HEAD` (or `pl check <ref>`), against the merge-base with the trunk (or
+`--base <ref>`). It exits 0 on PASS, 1 on FAIL and 2 when it could not run.
+`pl check --explain` prints the files and line ranges it would mutate and the
+exact engine commands, and runs nothing. When the gate has `builtin:mutants`,
+`pl new --brief` asks the lane's agent to run `pl check` before `pl done`.
+
+Limits:
+
+- The engines are external. A missing engine is UNAVAILABLE: the train stops,
+  blames no lane, and leaves the candidates as they were.
+- The scope is the diff. Code a lane did not touch is not mutated again, even
+  when the lane weakened the tests that cover it.
+- The `budget` covers all engines in one run, and every train, and each half of
+  a bisection, runs it again. Over budget, the engine and everything it started
+  are stopped and the result is UNAVAILABLE: a timeout stops the train, it never
+  passes it and never bounces a lane. Raise `budget` or narrow it with `skip`.
+- mutmut mutates function bodies only, and does not run on Windows outside WSL.
+  For Python, the killed count is per changed function, not per line.
 
 ### Review
 

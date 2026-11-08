@@ -1,0 +1,5 @@
+    tasks.counter.x_count_finished__mutmut_1: killed
+    tasks.counter.x_count_finished__mutmut_2: killed
+    tasks.counter.x_count_finished__mutmut_3: survived
+    tasks.counter.x_count_finished__mutmut_4: killed
+    tasks.counter.x_count_finished__mutmut_5: killed

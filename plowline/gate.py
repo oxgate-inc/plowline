@@ -1,8 +1,8 @@
 """The gate: the commands that must pass on the merged train before anything lands.
 
 `gate` is one command or a list of commands. They run in order on the merged tree and the first red one stops
-the run. A step written `builtin:<name>` runs a check that ships with Plowline instead of a shell command;
-none ships yet, and `builtin:mutants` (a diff-scoped mutation test) is planned for 0.3.
+the run. A step written `builtin:<name>` runs a check that ships with Plowline instead of a shell command:
+`builtin:mutants` is a mutation test of the lines the train changed (see mutants.py).
 
 The verdict comes from the exit codes this runner captured itself, never from a tail of the output, and every
 run ends with one completion line: GATE: PASS, GATE: FAIL or GATE: UNAVAILABLE. A command that could not start
@@ -19,7 +19,6 @@ from typing import Callable
 
 NOT_FOUND = {127, 9009}  # sh and cmd.exe exit codes for "command not found"
 NOT_RECOGNIZED = "is not recognized as an internal or external command"  # cmd.exe exits 1 with this line
-COMING = {"mutants": "0.3"}
 _ISOLATED = [False]
 
 
@@ -55,8 +54,22 @@ class GateResult:
         return self.status == "pass"
 
 
-# name -> check(ctx) -> (exit code, output). Registered by Plowline itself, never from configuration.
-BUILTIN_GATES: dict[str, Callable[[GateContext], tuple[int, str]]] = {}
+@dataclass
+class StepResult:
+    """What a built-in step returns: pass, fail or unavailable (it could not judge), its full output, and the one
+    line the GATE: line quotes."""
+    status: str
+    output: str
+    summary: str = ""
+
+
+def _mutants(ctx: GateContext) -> StepResult:
+    from plowline import mutants  # imported on use: mutants imports this module
+    return mutants.gate_step(ctx)
+
+
+# name -> check(ctx) -> StepResult, or (exit code, output). Registered by Plowline itself, never from configuration.
+BUILTIN_GATES: dict[str, Callable[[GateContext], StepResult | tuple[int, str]]] = {"mutants": _mutants}
 
 
 class GateConfigError(Exception):
@@ -75,8 +88,8 @@ def gate_steps(value) -> list[str]:
         if step.startswith("builtin:"):
             name = step.removeprefix("builtin:").strip()
             if name not in BUILTIN_GATES:
-                soon = f" (it is planned for Plowline {COMING[name]})" if name in COMING else ""
-                raise GateConfigError(f"gate step {step!r}: no built-in gate named {name!r}{soon}")
+                known = ", ".join(f"builtin:{n}" for n in sorted(BUILTIN_GATES))
+                raise GateConfigError(f"gate step {step!r}: no built-in gate named {name!r} (built-in steps: {known})")
     return steps
 
 
@@ -87,7 +100,21 @@ def run_gate(steps: list[str], ctx: GateContext) -> GateResult:
     for i, step in enumerate(steps, 1):
         label = f"step {i}/{n} `{step}`"
         if step.startswith("builtin:"):
-            code, out = BUILTIN_GATES[step.removeprefix("builtin:").strip()](ctx)
+            try:
+                ran = BUILTIN_GATES[step.removeprefix("builtin:").strip()](ctx)
+            except Exception as e:  # a crash in Plowline's own check is not proof against any lane
+                return GateResult("unavailable", f"GATE: UNAVAILABLE at {label}: it crashed: {type(e).__name__}: {e}",
+                                  "\n".join(o for o in outputs if o))
+            if isinstance(ran, StepResult):
+                outputs.append(ran.output.strip())
+                joined = "\n".join(o for o in outputs if o)
+                summary = ran.summary or (ran.output.strip().splitlines() or [ran.status])[0]
+                if ran.status == "unavailable":
+                    return GateResult("unavailable", f"GATE: UNAVAILABLE at {label}: {summary}", joined)
+                if ran.status != "pass":
+                    return GateResult("fail", f"GATE: FAIL at {label}: {summary}", joined)
+                continue
+            code, out = ran
         else:
             try:
                 p = subprocess.run(step, shell=True, cwd=ctx.tree, capture_output=True, text=True,

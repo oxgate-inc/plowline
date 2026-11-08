@@ -1,0 +1,11 @@
+def untouched(x):
+    return x + 1
+
+
+class Shelf:
+    def __init__(self, items):
+        self.items = items
+
+    def total(self):
+        """Sum of the positive counts."""
+        return sum(i["n"] for i in self.items if i["n"] > 0)

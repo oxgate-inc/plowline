@@ -1,0 +1,3 @@
+src/lib.rs:5:9: replace is_even -> bool with true
+src/lib.rs:12:5: replace add -> i32 with 0
+src/main.rs:3:5: replace main with ()
