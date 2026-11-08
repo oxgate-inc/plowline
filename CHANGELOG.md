@@ -44,14 +44,18 @@
   now show in `pl show`.
 - **`--after <lane>`.** A lane joins a train only once the named lane has landed.
 - **`--priority N` and `max_lanes`.** Higher priority merges first. `pl new`
-  refuses an existing branch or worktree, a reused lane name, a dirty trunk
-  checkout, or a full cap, each with a one-line reason.
+  refuses an existing branch or worktree, a full cap, or (local-only mode) a
+  trunk checkout with uncommitted changes, each with a one-line reason. With a
+  remote it notes uncommitted or unpushed trunk work the lane will start
+  without. Reusing the name of a cleaned lane keeps the old log and notice as
+  `<lane>.1`.
 - **Dirty worktrees.** `pl done` prints exactly what is uncommitted and stops.
 - **Notices and auto-repair.** Every bounce writes `.plowline/notices/<lane>.md`
-  (reason, paths or gate output, what to do); `pl resume` prints it. With an
-  `agent` command that takes `{lane}`, `{path}` or `{notice}`, a train bounce
-  restarts the agent with the notice on stdin, up to `repair_attempts` (default
-  2), then prints "split this lane or re-plan".
+  (reason, paths or gate output, what to do); `pl resume` prints it. With
+  `repair = "<command>"` (placeholders `{lane}`, `{path}`, `{notice}`), a train
+  bounce starts that command in the lane with the notice on stdin, up to
+  `repair_attempts` (default 2), then prints "split this lane or re-plan".
+  `agent` keeps meaning what `pl open` starts.
 - **Brief scaffold.** `pl new <lane> --brief` writes `briefs/<lane>.md` with Goal,
   Files you may touch, Do not touch, Acceptance and Report. Briefs are read live.
   The lane prompt, the brief and the review prompt ask for a closing block:

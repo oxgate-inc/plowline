@@ -40,6 +40,7 @@ DEFAULTS = {
     "worktrees": "../{repo}-lanes",
     "branch_prefix": "lane/",
     "agent": "claude",
+    "repair": "",
     "repair_attempts": 2,
     "land": "push",
     "on_land": "",
@@ -53,7 +54,6 @@ DIFF_LIMIT = 200_000
 LOCK_STALE_SECONDS = 2 * 60 * 60
 STANCHION_TIMEOUT = 300  # seconds; `stanchion up` copies a database and may run a setup hook
 NOTES_DIR = ".plowline"  # notices, follow-ups, logs and backups people and agents read; gitignored by setup
-AGENT_FIELDS = ("{lane}", "{path}", "{notice}")
 MERGE_TREE_GIT = (2, 38)  # `git merge-tree --write-tree --name-only`
 
 EVIDENCE_BLOCK = """COMMIT: <the commit you finished on>
@@ -299,12 +299,10 @@ class Yard:
         value = self.cfg["generated"]
         return [value] if isinstance(value, str) and value else [v for v in value if isinstance(v, str)]
 
-    def agent_template(self) -> bool:
-        """An agent command with {lane}, {path} or {notice} can run a lane unattended: bounces repair themselves."""
-        return any(f in str(self.cfg["agent"]) for f in AGENT_FIELDS)
-
-    def agent_command(self, lane: Lane) -> str:
-        cmd = str(self.cfg["agent"])
+    def agent_command(self, lane: Lane, key_name: str = "agent") -> str:
+        """`agent` (what pl open starts) or `repair` (what fixes a bounced lane), with {lane}, {path} and
+        {notice} filled in."""
+        cmd = str(self.cfg[key_name])
         for key, value in (("{lane}", lane.name), ("{path}", lane.worktree),
                            ("{notice}", str(self.notice_file(lane.name)))):
             cmd = cmd.replace(key, quote_arg(value) if key != "{lane}" else value)
@@ -508,9 +506,9 @@ def bounce(y: Yard, lane: Lane, reason: str, detail: str, *, paths: list[str] | 
 
 
 def auto_repair(y: Yard, lane: Lane) -> None:
-    """With an agent command that takes {lane}, {path} or {notice}, a bounce relaunches the lane's agent with its
-    notice on stdin, at most repair_attempts times. Then a person decides."""
-    if not y.agent_template():
+    """With `repair` set, a bounce starts that command in the lane with the notice on stdin, at most
+    repair_attempts times. Then a person decides."""
+    if not str(y.cfg["repair"]).strip():
         return
     cap = int(y.cfg["repair_attempts"])
     if cap <= 0:
@@ -527,13 +525,13 @@ def auto_repair(y: Yard, lane: Lane) -> None:
     lane.state = "active"
     y.save(lane)
     y.lane_env("up", lane)
-    cmd = y.agent_command(lane)
+    cmd = y.agent_command(lane, "repair")
     argv = command_argv(cmd)
     exe = shutil.which(argv[0]) if argv else None
     if not exe:
         lane.state = "bounced"
         y.save(lane)
-        print(f"auto-repair: {argv[0] if argv else '(empty agent)'} is not on PATH; lane {lane.name} stays bounced")
+        print(f"auto-repair: {argv[0] if argv else '(empty repair)'} is not on PATH; lane {lane.name} stays bounced")
         return
     y.log(lane.name, f"auto-repair {lane.repairs}/{cap}: {cmd}")
     env = {**os.environ, "PLOWLINE_LANE": lane.name, "PLOWLINE_NOTICE": str(y.notice_file(lane.name)),
@@ -641,6 +639,7 @@ def cmd_setup(y: Yard, a) -> int:
             f"regenerate = {json.dumps(regenerate)}  # optional: rebuilds generated files on the merged tree\n"
             "generated = []  # files regenerate rebuilds, e.g. [\"package-lock.json\"]: a conflict only there takes the trunk's side\n"
             f"agent = {json.dumps(agent)}  # what `pl open` starts in a lane's terminal\n"
+            "repair = \"\"  # optional: a command that fixes a bounced lane by itself (gets the notice on stdin)\n"
             f"land = {json.dumps(land)}  # \"push\" to the trunk, or \"pr\": open one pull request per train\n"
             f"on_land = {json.dumps(on_land)}  # optional: runs after each landing (deploy, tag, notify)\n"
             "strict_paths = false  # true: a lane that changes files outside its --paths bounces at pl done\n"
@@ -718,6 +717,20 @@ def scaffold_brief(y: Yard, name: str, paths: list[str]) -> Path:
     return f
 
 
+def retire_old_lane_files(y: Yard, name: str) -> None:
+    """A name used by an earlier, cleaned lane: move its log, notice and backups to <name>.<n> so the new lane
+    starts fresh and nothing of the old one is lost or mixed in."""
+    old = [p for p in (y.log_file(name), y.notice_file(name), y.notes / "backups" / name) if p.exists()]
+    if not old:
+        return
+    n = 1
+    while any((p.with_name(f"{name}.{n}{p.suffix}")).exists() for p in old):
+        n += 1
+    for p in old:
+        p.rename(p.with_name(f"{name}.{n}{p.suffix}"))
+    print(f"lane name {name} was used before; its old log and notice are kept as {name}.{n}")
+
+
 def cmd_new(y: Yard, a) -> int:
     name = a.name
     if not LANE_NAME.match(name):
@@ -726,8 +739,6 @@ def cmd_new(y: Yard, a) -> int:
     wt = y.worktree_dir(name)
     if y.lane_file(name).exists():
         raise YardError(f"lane {name!r} already exists; use `pl resume {name}` or pick a new name")
-    if y.log_file(name).exists():
-        raise YardError(f"lane name {name!r} was used before (its log is {y.log_file(name)}); pick a fresh name")
     if git_ok("show-ref", "--verify", "--quiet", f"refs/heads/{branch}", cwd=y.root):
         raise YardError(f"branch {branch} already exists")
     if y.has_remote() and git_ok("ls-remote", "--exit-code", "--heads", y.cfg["remote"], branch, cwd=y.root):
@@ -741,11 +752,12 @@ def cmd_new(y: Yard, a) -> int:
     if a.after and not y.lane_file(a.after).exists():
         raise YardError(f"--after {a.after}: no lane named {a.after!r}")
     checkout = y.trunk_checkout()
-    if checkout is not None:
-        dirty = git("status", "--porcelain", "--untracked-files=no", cwd=checkout).splitlines()
-        if dirty:
-            raise YardError(f"the trunk checkout {checkout} has uncommitted changes ({len(dirty)} file(s)); "
-                            "commit or stash them first")
+    remote = y.has_remote()
+    dirty = git("status", "--porcelain", "--untracked-files=no", cwd=checkout).splitlines() if checkout else []
+    if dirty and not remote:
+        raise YardError(f"{checkout} has uncommitted changes ({len(dirty)} file(s)) on {y.cfg['trunk']}; commit "
+                        "them first, so the lane starts from them")
+    retire_old_lane_files(y, name)
     paths = [p.replace("\\", "/") for p in (a.paths or [])]
     brief_path = ""
     if a.brief is True:
@@ -755,6 +767,15 @@ def cmd_new(y: Yard, a) -> int:
     brief = Path(brief_path).read_text(encoding="utf-8") if brief_path else ""
     base_ref = y.trunk_ref(fetch=True)
     base = git("rev-parse", base_ref, cwd=y.root)
+    if remote:
+        trunk = y.cfg["trunk"]
+        unpushed = git("rev-list", "--count", f"{base_ref}..refs/heads/{trunk}", cwd=y.root, check=False)
+        if dirty:
+            print(f"note: {checkout} has uncommitted changes ({len(dirty)} file(s)); lanes start from {base_ref} "
+                  "without them. Commit and push them first if the lane needs them.")
+        if unpushed and unpushed != "0":
+            print(f"note: your {trunk} has {unpushed} commit(s) not on {base_ref}; lanes start without them. "
+                  f"Push {trunk} first if the lane needs them.")
     git("worktree", "add", "--quiet", "-b", branch, str(wt), base, cwd=y.root)
     lane = Lane(name=name, branch=branch, worktree=str(wt), base=base, paths=paths, brief=brief,
                 brief_path=brief_path, after=a.after or "", priority=a.priority)

@@ -130,7 +130,8 @@ review = "builtin:claude"        # see Review below
 regenerate = ""                  # optional: rebuild generated files on the merged tree
 generated = []                   # files regenerate rebuilds, e.g. ["package-lock.json"]
 agent = "claude"                 # what `pl open` starts in a lane: "codex", "gemini", "aider", ...
-repair_attempts = 2              # automatic repairs per lane, when agent takes {lane}/{path}/{notice}
+repair = ""                      # optional: fixes a bounced lane by itself; see Auto-repair
+repair_attempts = 2              # automatic repairs per lane before a person decides
 land = "push"                    # "push" to the trunk, or "pr": open one pull request per train
 on_land = ""                     # optional: runs after each landing (deploy, tag, notify)
 strict_paths = false             # true: changing files outside --paths bounces the lane
@@ -283,9 +284,12 @@ about log2(n) extra gate runs.
   can be reviewed, but it joins a train only once `api` has landed.
 - **Order and cap.** `--priority N` (default 0, higher first) orders the train.
   `max_lanes = 4` caps the lanes not yet landed.
-- **Refusals.** `pl new` refuses a branch or worktree that already exists, a lane
-  name used before (its log is kept), a trunk checkout with uncommitted changes,
-  and a full cap, each with a one-line reason. `pl done` refuses a worktree with
+- **Refusals and notes.** `pl new` refuses a branch or worktree that already
+  exists and a full cap, each with a one-line reason. In local-only mode it also
+  refuses while `main` has uncommitted changes (the lane would start without
+  them); with a remote it just says what the lane will not include: uncommitted
+  changes, or commits not pushed yet. A lane name can be used again once the old
+  lane is cleaned: its log and notice are kept as `<lane>.1`. `pl done` refuses a worktree with
   uncommitted changes and prints exactly what is uncommitted.
 - **A GO is bound to a commit.** `pl done` records the lane head and the trunk it
   was reviewed on. The train merges exactly that head; if the branch moved, the
@@ -301,22 +305,22 @@ paths or the files outside the claim, the last 40 lines of gate output, and what
 to do (merge the trunk, never rebase, fix, re-test, `pl done`). `pl resume <lane>`
 prints it.
 
-To have bounces repair themselves, write `agent` as a command that runs your
-agent unattended in a lane and takes at least one of `{lane}`, `{path}` (the
-worktree) or `{notice}` (the notice file). On a bounce in a train, Plowline starts
-it in the lane's worktree with the notice on stdin (long text never goes in the
-command line), and its output goes to `.plowline/logs/<lane>.log`. The agent
-fixes the lane and runs `pl done` itself.
+To have bounces fix themselves, set `repair` to a command that runs your agent
+without a person in the loop. When a train bounces a lane, Plowline starts it in
+the lane's worktree with the notice on stdin (long text never goes in the command
+line); `{lane}`, `{path}` (the worktree) and `{notice}` (the notice file) are
+filled in if the command uses them. Its output goes to
+`.plowline/logs/<lane>.log`. The agent fixes the lane and runs `pl done` itself.
 
 ```toml
-agent = "./scripts/run-agent.sh {lane} {path} {notice}"
+repair = "./scripts/fix-lane.sh {lane} {path}"
 repair_attempts = 2
 ```
 
 After `repair_attempts` restarts, the next bounce prints "split this lane or
-re-plan" and Plowline stops restarting it. With a plain `agent` (no
-placeholders), bounces stay manual. `pl open` starts the same command in a
-terminal, with the lane prompt as its last argument.
+re-plan" and Plowline stops restarting it. Leave `repair` empty and bounces wait
+for you: open the lane (`pl open <lane>`) and tell the agent to run
+`pl resume <lane>`.
 
 ### Briefs, reports and follow-ups
 

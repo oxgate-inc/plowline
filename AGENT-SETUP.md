@@ -97,14 +97,16 @@ gate = ["<lint>", "<tests>"]     # item 2, if it is a list
 generated = ["<file>", ...]      # item 6
 strict_paths = false             # item 7
 max_lanes = 4                    # item 7
-agent = "<unattended agent command> {lane} {path} {notice}"   # item 8, only if they said yes
+repair = "<unattended agent command>"   # item 8, only if they said yes
 repair_attempts = 2              # item 8
 ```
 
 For item 8 the command must run the agent without a person: it gets the notice
-on stdin, works in the lane's worktree (`{path}`), and should end by running
-`pl done {lane}`. A small wrapper script in the repository is the usual shape.
-If you are not sure the person's agent CLI can do that, leave `agent` plain.
+on stdin, runs in the lane's worktree (`{path}` and `{lane}` are filled in if
+used), and should end by running `pl done <lane>`. A small wrapper script in the
+repository is the usual shape. Try it once by hand on a throwaway lane before
+turning it on. If you are not sure the person's agent CLI can do that, leave
+`repair` empty.
 
 Show the person `git show --stat HEAD`, then ask before pushing. Lanes branch
 from the remote main, so they only see the setup once it's pushed:

@@ -48,9 +48,10 @@ class RepoCase(unittest.TestCase):
     def pl(self, *args, cwd=None):
         return self.run_(sys.executable, "-m", "plowline", *args, cwd=cwd)
 
-    def configure(self, extra: str = "", gate: str | None = None) -> None:
+    def configure(self, extra: str = "", gate: str | None = None, remote: str = "") -> None:
         gate = gate if gate is not None else f"gate = '\"{PY}\" gate.py'"
-        (self.app / "plowline.toml").write_text(f"[plowline]\nremote = \"\"\nreview = \"\"\n{gate}\n{extra}")
+        (self.app / "plowline.toml").write_text(
+            f"[plowline]\nremote = \"{remote}\"\nreview = \"\"\n{gate}\n{extra}")
         self.git("add", "-A")
         self.git("commit", "-qm", "init")
 

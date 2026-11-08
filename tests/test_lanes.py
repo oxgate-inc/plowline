@@ -101,21 +101,44 @@ class AfterAndPriorityTest(RepoCase):
         self.wt("e").mkdir(parents=True)
         self.assertIn("already exists", self.pl("new", "e").stderr)
 
-    def test_new_refuses_a_dirty_trunk(self):
+    def test_new_refuses_a_dirty_trunk_in_local_only_mode(self):
         self.configure()
         (self.app / "shared.txt").write_text("edited, not committed\n")
         new = self.pl("new", "a")
         self.assertEqual(new.returncode, 2)
         self.assertIn("has uncommitted changes (1 file(s))", new.stderr)
 
-    def test_a_cleaned_lane_name_is_not_reused(self):
+    def test_with_a_remote_a_dirty_or_unpushed_trunk_is_a_plain_note(self):
+        self.git("init", "-q", "--bare", "-b", "main", str(self.tmp / "origin.git"))
+        self.git("remote", "add", "origin", str(self.tmp / "origin.git"))
+        self.configure(remote="origin")
+        self.git("push", "-q", "-u", "origin", "main")
+        (self.app / "local.txt").write_text("x\n")
+        self.git("add", "-A")
+        self.git("commit", "-qm", "not pushed")
+        (self.app / "shared.txt").write_text("edited, not committed\n")
+        new = self.pl("new", "a")
+        self.assertEqual(new.returncode, 0, new.stderr)
+        self.assertIn("lanes start from origin/main without them", new.stdout)
+        self.assertIn("1 commit(s) not on origin/main", new.stdout)
+
+    def test_a_cleaned_lane_name_starts_fresh_and_keeps_the_old_files(self):
         self.configure()
-        self.lane("a", {"a.txt": "a\n"})
+        self.lane("a", {"a.txt": "BROKEN\n"})
+        self.pl("train")
+        self.pl("resume", "a")
+        self.commit("a", {"a.txt": "fixed\n"})
+        self.pl("done", "a")
         self.pl("train")
         self.pl("clean")
         again = self.pl("new", "a")
-        self.assertEqual(again.returncode, 2)
-        self.assertIn("pick a fresh name", again.stderr)
+        self.assertEqual(again.returncode, 0, again.stderr)
+        self.assertIn("kept as a.1", again.stdout)
+        notes = self.app / ".plowline"
+        self.assertIn("GATE_FAIL", (notes / "notices" / "a.1.md").read_text())
+        self.assertFalse((notes / "notices" / "a.md").exists())
+        self.assertIn("landed", (notes / "logs" / "a.1.log").read_text())
+        self.assertNotIn("landed", (notes / "logs" / "a.log").read_text())
 
 
 class DirtyDoneTest(RepoCase):
@@ -158,7 +181,7 @@ class NoticeAndRepairTest(RepoCase):
         self.addCleanup(ENV.pop, "AGENT_LOG", None)
         (self.tmp / "agent.py").write_text(FAKE_AGENT)
         agent = (self.tmp / "agent.py").as_posix()
-        self.configure(f"agent = '\"{PY}\" \"{agent}\" {{lane}} {{path}} {{notice}}'\nrepair_attempts = 1\n")
+        self.configure(f"repair = '\"{PY}\" \"{agent}\" {{lane}} {{path}} {{notice}}'\nrepair_attempts = 1\n")
         self.lane("a", {"a.txt": "BROKEN\n"})
         train = self.pl("train")
         self.assertIn("auto-repair 1/1: started the agent in lane a", train.stdout, train.stdout + train.stderr)
@@ -174,8 +197,8 @@ class NoticeAndRepairTest(RepoCase):
         self.assertEqual(self.state("a"), "bounced")
         self.assertEqual(len(agent_log.read_text().strip().splitlines()), 1)
 
-    def test_without_an_agent_template_bounces_stay_manual(self):
-        self.configure("agent = \"claude\"\n")
+    def test_without_repair_bounces_stay_manual(self):
+        self.configure("agent = \"claude {lane}\"\n")
         self.lane("a", {"a.txt": "BROKEN\n"})
         train = self.pl("train")
         self.assertNotIn("auto-repair", train.stdout)
