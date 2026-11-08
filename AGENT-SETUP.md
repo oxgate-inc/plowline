@@ -43,7 +43,8 @@ know for certain.
 >    protected), `pr` to open one pull request per train for you to approve, or
 >    **local-only** if there's no remote.
 > 2. **The gate**, the command that must pass before anything lands. I found
->    `<command>` and it passes now.
+>    `<command>` and it passes now. If CI runs several checks (lint, types,
+>    tests), the gate can be the same list, run in order.
 > 3. **Reviewer.** `builtin:claude` or `builtin:codex` if they use one of
 >    those, otherwise a command that runs their agent on the diff, or none.
 >    Each review is one extra agent call per lane.
@@ -53,7 +54,14 @@ know for certain.
 > 5. **After each landing**, an optional command, such as a staging deploy or a
 >    chat message. Recommended: none for now.
 > 6. **Generated files.** Only if I found some: `<command>` rebuilds them after
->    merging, so lanes don't conflict on them.
+>    merging, and listing `<files>` as generated lets a conflict only in them
+>    take main's side and be rebuilt, instead of bouncing a lane.
+> 7. **Lane rules.** Recommended: files a lane changes outside its claimed
+>    paths are a warning (`strict_paths = false`), and at most four lanes at once
+>    (`max_lanes = 4`) for one person.
+> 8. **Automatic repair.** Only if their agent CLI can run unattended: a bounced
+>    lane restarts its agent with the bounce notice, at most twice. Recommended:
+>    off until they have watched a few bounces.
 
 Wait for the answers. If an answer is unclear, ask about that item only.
 
@@ -78,7 +86,27 @@ pl setup --yes --commit \
 Setup writes `plowline.toml`, checks that the gate passes, adds the lane rules
 to `AGENTS.md` and `CLAUDE.md` (between them, read by most CLI agents), writes
 `briefs/TEMPLATE.md` and a dispatcher skill at `.claude/skills/plowline/SKILL.md`,
-and commits them. It never pushes unless you add `--push`.
+adds `.plowline/` (bounce notices, follow-ups, logs) to `.gitignore`, and commits
+them. It never pushes unless you add `--push`.
+
+Answers that have no flag are set in `plowline.toml` (setup already writes most of
+these lines with their defaults). Commit that change as a second commit:
+
+```toml
+gate = ["<lint>", "<tests>"]     # item 2, if it is a list
+generated = ["<file>", ...]      # item 6
+strict_paths = false             # item 7
+max_lanes = 4                    # item 7
+repair = "<unattended agent command>"   # item 8, only if they said yes
+repair_attempts = 2              # item 8
+```
+
+For item 8 the command must run the agent without a person: it gets the notice
+on stdin, runs in the lane's worktree (`{path}` and `{lane}` are filled in if
+used), and should end by running `pl done <lane>`. A small wrapper script in the
+repository is the usual shape. Try it once by hand on a throwaway lane before
+turning it on. If you are not sure the person's agent CLI can do that, leave
+`repair` empty.
 
 Show the person `git show --stat HEAD`, then ask before pushing. Lanes branch
 from the remote main, so they only see the setup once it's pushed:
@@ -109,10 +137,11 @@ Offer a five-minute tour. If they say yes:
 
    | Step | Command | Who |
    |---|---|---|
-   | Start a lane with a brief, in a new terminal | `pl new <lane> --paths <files> --brief briefs/<lane>.md --open` | the person, or you |
+   | Start a lane with a brief to fill in, in a new terminal | `pl new <lane> --paths <files> --brief --open` | the person, or you |
+   | Start a lane that waits for another | `pl new <lane> --paths <files> --after <other>` | the person, or you |
    | Keep a control tower open | `pl watch` | the person, one terminal |
    | Finish a lane | `pl done <lane>` | the lane's agent |
-   | Fix a bounced lane | `pl resume <lane>` | the lane's agent |
+   | Fix a bounced lane (prints its notice) | `pl resume <lane>` | the lane's agent |
    | Tidy up | `pl clean` | anyone |
 
 3. **Tell them they can delegate the dispatching to you.** From now on, in this
