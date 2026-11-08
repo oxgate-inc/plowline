@@ -1235,7 +1235,8 @@ def cmd_watch(y: Yard, a) -> int:
     events: list[str] = []
     try:
         while True:
-            if any(l.state in ("candidate", "proposed") for l in y.lanes()) and not a.no_train:
+            ready = any(l.state == "proposed" or (l.state == "candidate" and not y.waiting_on(l)) for l in y.lanes())
+            if ready and not a.no_train:
                 buf = io.StringIO()
                 with redirect_stdout(buf):
                     try:

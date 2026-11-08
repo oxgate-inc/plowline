@@ -65,6 +65,14 @@ class AfterAndPriorityTest(RepoCase):
         self.pl("train")
         self.assertEqual(self.state("b"), "landed")
 
+    def test_watch_runs_no_train_for_a_lane_that_only_waits(self):
+        self.configure()
+        self.pl("new", "a")
+        self.lane("b", {"b.txt": "b\n"}, "--after", "a")
+        watched = self.pl("watch", "--once")
+        self.assertNotIn("recent trains", watched.stdout)
+        self.assertIn("after a (waiting)", watched.stdout)
+
     def test_after_must_name_a_lane(self):
         self.configure()
         new = self.pl("new", "b", "--after", "nope")
