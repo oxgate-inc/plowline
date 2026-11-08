@@ -176,7 +176,7 @@ for checks that ship with Plowline; the first, a diff-scoped mutation test
 | `review =` | What runs |
 |---|---|
 | `""` | No review. Every finished lane is a candidate. |
-| `"builtin:claude"` | `claude -p` reads the lane's brief and diff and answers GO or NO-GO. NO-GO is read first, after folding typographic dashes, and an answer with neither is a NO-GO. |
+| `"builtin:claude"` | `claude -p` reads the lane's brief and diff and answers GO or NO-GO. A refusal in the first lines wins, however it is written (`NO-GO`, `NO GO`, `No go`, `not GO`, any dash), and an answer with neither is a NO-GO. |
 | `"builtin:codex"` | The same prompt through `codex exec`. |
 | any command | Use this for any other agent, or a script. Runs in the lane's worktree. Exit 0 is GO unless its first lines say NO-GO, and its output becomes the note. It gets `PLOWLINE_LANE`, `PLOWLINE_BRANCH`, `PLOWLINE_BASE`, `PLOWLINE_HEAD` and `PLOWLINE_WORKTREE`. |
 
@@ -273,6 +273,12 @@ it on top of a set already proven green, and if the trunk alone is red the train
 stops with `GATE_RED_ON_TRUNK` and blames nobody. One red lane among n costs
 about log2(n) extra gate runs.
 
+Two lanes that are each green but red together cannot both be right: the one
+later in train order is blamed (it went red on top of a set proven green), and
+the earlier one lands. A lane that merged fine with the whole train but no
+longer merges once the red lanes are left out bounces as a merge conflict, with
+the paths, not as a red gate.
+
 ### Lane rules
 
 - **Scope.** `pl done` diffs the lane against its merge-base with the trunk (so a
@@ -317,8 +323,13 @@ repair = "./scripts/fix-lane.sh {lane} {path}"
 repair_attempts = 2
 ```
 
+Write placeholders bare (`{path}`, not `"{path}"`): Plowline fills them in
+already quoted for your system.
+
 After `repair_attempts` restarts, the next bounce prints "split this lane or
-re-plan" and Plowline stops restarting it. Leave `repair` empty and bounces wait
+re-plan" and Plowline stops restarting it. The count starts over when the lane
+lands, or when a person runs `pl done` on it; the repair command runs with
+`PLOWLINE_REPAIR` set, so its own `pl done` keeps the count. Leave `repair` empty and bounces wait
 for you: open the lane (`pl open <lane>`) and tell the agent to run
 `pl resume <lane>`.
 

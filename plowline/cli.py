@@ -301,7 +301,8 @@ class Yard:
 
     def agent_command(self, lane: Lane, key_name: str = "agent") -> str:
         """`agent` (what pl open starts) or `repair` (what fixes a bounced lane), with {lane}, {path} and
-        {notice} filled in."""
+        {notice} filled in. Paths are filled in already quoted for the platform (double quotes on Windows,
+        shlex.quote elsewhere), so a template writes {path}, never "{path}"."""
         cmd = str(self.cfg[key_name])
         for key, value in (("{lane}", lane.name), ("{path}", lane.worktree),
                            ("{notice}", str(self.notice_file(lane.name)))):
@@ -535,7 +536,7 @@ def auto_repair(y: Yard, lane: Lane) -> None:
         return
     y.log(lane.name, f"auto-repair {lane.repairs}/{cap}: {cmd}")
     env = {**os.environ, "PLOWLINE_LANE": lane.name, "PLOWLINE_NOTICE": str(y.notice_file(lane.name)),
-           "PLOWLINE_WORKTREE": lane.worktree}
+           "PLOWLINE_WORKTREE": lane.worktree, "PLOWLINE_REPAIR": str(lane.repairs)}
     flags = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW} \
         if os.name == "nt" else {"start_new_session": True}
     # The notice goes in on stdin, never in argv: it is long and holds gate output.
@@ -925,6 +926,10 @@ def cmd_done(y: Yard, a) -> int:
                   "allowed, set strict_paths = true to bounce instead:")
             print("\n".join(f"  {p}" for p in outside))
             y.log(lane.name, f"outside the claim: {', '.join(outside)}")
+    if lane.repairs and not os.environ.get("PLOWLINE_REPAIR"):
+        print(f"repair count reset: pl done was run by hand, so {lane.name} gets "
+              f"{y.cfg['repair_attempts']} fresh automatic repair(s)")
+        lane.repairs = 0
     go, reason = (True, "review skipped") if a.no_review else y.review(lane, head, base)
     lane.note = reason
     if not go:
@@ -957,7 +962,7 @@ def settle_pr(y: Yard) -> bool:
     if info.get("state") == "MERGED":
         commit = (info.get("mergeCommit") or {}).get("oid") or pr["head"]
         for lane in lanes:
-            lane.state, lane.note = "landed", f"landed in {commit} via {pr['url']}"
+            lane.state, lane.note, lane.repairs = "landed", f"landed in {commit} via {pr['url']}", 0
             y.save(lane)
             y.log(lane.name, f"landed in {commit} via {pr['url']}")
             y.events.append(("landed", lane.branch, ""))
@@ -1109,7 +1114,7 @@ def run_train(y: Yard, dry_run: bool = False, stale_after: float | None = None) 
             else:
                 y.land_local(head, tip)
             for lane in green:
-                lane.state, lane.note = "landed", f"landed in {head}"
+                lane.state, lane.note, lane.repairs = "landed", f"landed in {head}", 0
                 y.save(lane)
                 y.log(lane.name, f"landed in {head}")
                 y.events.append(("landed", lane.branch, ""))
@@ -1127,6 +1132,7 @@ def gate_train(y: Yard, scratch: Path, tip: str, base_ref: str, merged: list[Lan
     heads: dict[tuple[str, ...], str] = {(): tip, tuple(l.name for l in merged): git("rev-parse", "HEAD", cwd=scratch)}
     results: dict[tuple[str, ...], gates.GateResult] = {}
     built = [tuple(l.name for l in merged)]  # the tree currently checked out holds this set, before regenerate
+    merge_failures: dict[tuple[str, ...], tuple[str, list[str]]] = {}  # subset -> (lane that failed, paths)
 
     def build(subset: list[Lane]) -> bool:
         key = tuple(l.name for l in subset)
@@ -1134,8 +1140,9 @@ def gate_train(y: Yard, scratch: Path, tip: str, base_ref: str, merged: list[Lan
             git("reset", "--quiet", "--hard", tip, cwd=scratch)
             git("clean", "-fdq", cwd=scratch)
             for lane in subset:
-                ok, _ = merge_lane(y, scratch, lane)
-                if not ok:  # merged in the full train but not in this subset: count it as red
+                ok, paths = merge_lane(y, scratch, lane)
+                if not ok:  # merged in the full train but not in this smaller set: count it as red
+                    merge_failures[key] = (lane.name, paths)
                     git("reset", "--quiet", "--hard", tip, cwd=scratch)
                     built[0] = ()
                     return False
@@ -1155,7 +1162,9 @@ def gate_train(y: Yard, scratch: Path, tip: str, base_ref: str, merged: list[Lan
         key = tuple(l.name for l in subset)
         names = ", ".join(key) or "no lanes (the trunk alone)"
         if not build(subset):
-            print(f"gate on {len(key)} lane(s): {names} -> these lanes do not merge without the others; red")
+            failed, paths = merge_failures[key]
+            print(f"gate on {len(key)} lane(s): {names} -> {failed} does not merge in this smaller set "
+                  f"({', '.join(paths)}); counted as red")
             return False
         result = gates.run_gate(steps, gates.GateContext(tree=scratch, base=tip, head=heads[key], lanes=list(key)))
         results[key] = result
@@ -1184,6 +1193,13 @@ def gate_train(y: Yard, scratch: Path, tip: str, base_ref: str, merged: list[Lan
         accepted = blamed[lane.name]
         result = results.get(accepted + (lane.name,))
         on_top = f"{base_ref} {tip[:9]}" + (f" + {', '.join(accepted)}" if accepted else "")
+        failed = merge_failures.get(accepted + (lane.name,))
+        if failed and failed[0] == lane.name:
+            bounce(y, lane, "MERGE_CONFLICT", f"{lane.branch} merged with the whole train, but it conflicts with "
+                                              f"{on_top} once the red lanes are left out.", paths=failed[1],
+                   fix="Resolve the conflicting paths in the merge, keeping both sides' intent; the lane may "
+                       "lean on work from a lane that bounced.")
+            continue
         bounce(y, lane, "GATE_FAIL", f"the gate went red when {lane.name} was merged onto {on_top}, which is green "
                                      f"without it.\n{result.line if result else ''}",
                output=result.output if result else "",

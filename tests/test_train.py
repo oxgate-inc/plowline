@@ -77,6 +77,75 @@ class BisectionTrainTest(RepoCase):
         self.assertEqual(marker.read_text(), "|b|")
 
 
+PAIR_GATE = ("import pathlib, sys\n"
+             "sys.exit('x and y clash' if pathlib.Path('x.txt').exists() and pathlib.Path('y.txt').exists() else 0)\n")
+
+
+class BisectionEdgeTest(RepoCase):
+    def test_two_individually_red_lanes_both_bounce_and_the_rest_land(self):
+        self.configure()
+        for name in "abcd":
+            self.lane(name, {f"{name}.txt": "BROKEN\n" if name in "bd" else f"{name}\n"})
+        train = self.pl("train")
+        self.assertIn("bisection: red b, d; green a, c", train.stdout, train.stdout + train.stderr)
+        self.assertEqual({n: self.state(n) for n in "abcd"},
+                         {"a": "landed", "b": "bounced", "c": "landed", "d": "bounced"})
+
+    def test_a_pair_green_alone_but_red_together_blames_the_later_lane(self):
+        (self.app / "pair.py").write_text(PAIR_GATE)
+        self.configure(gate=f"gate = '\"{PY}\" pair.py'")
+        self.lane("x", {"x.txt": "x\n"})
+        self.lane("y", {"y.txt": "y\n"})
+        train = self.pl("train")
+        self.assertIn("bisection: red y; green x", train.stdout, train.stdout + train.stderr)
+        self.assertEqual((self.state("x"), self.state("y")), ("landed", "bounced"))
+        self.assertIn("x and y clash", (self.app / ".plowline" / "notices" / "y.md").read_text())
+
+    def test_a_lane_that_no_longer_merges_in_a_smaller_set_bounces_as_a_conflict(self):
+        from plowline import cli
+        self.configure()
+        self.lane("a", {"a.txt": "a\n"})
+        self.lane("b", {"b.txt": "BROKEN\n"})
+        self.lane("c", {"c.txt": "c\n"})
+        real = cli.merge_lane
+
+        def merge_lane(y, tree, lane):
+            # c merges only on top of b, as if it built on b's change: without b it conflicts in c.txt.
+            if lane.name == "c" and "land lane/b" not in cli.git("log", "--format=%s", cwd=tree):
+                return False, ["c.txt"]
+            return real(y, tree, lane)
+        with mock.patch.object(cli, "merge_lane", merge_lane):
+            code, out = self.in_process("train")
+        self.assertEqual({n: self.state(n) for n in "abc"}, {"a": "landed", "b": "bounced", "c": "bounced"}, out)
+        notice_c = (self.app / ".plowline" / "notices" / "c.md").read_text()
+        self.assertIn("MERGE_CONFLICT", notice_c)
+        self.assertIn("## Conflicting paths\n- c.txt", notice_c)
+        self.assertNotIn("GATE_FAIL", notice_c)
+        self.assertIn("GATE_FAIL", (self.app / ".plowline" / "notices" / "b.md").read_text())
+
+
+class OldStateTest(RepoCase):
+    def test_a_lane_saved_by_0_1_still_trains(self):
+        import json
+        self.configure()
+        self.pl("new", "old")
+        self.commit("old", {"old.txt": "old\n"})
+        head = self.git("rev-parse", "lane/old")
+        f = self.app / ".git" / "plowline" / "lanes" / "old.json"
+        v01 = {k: v for k, v in json.loads(f.read_text()).items()
+               if k in ("name", "branch", "worktree", "base", "paths", "brief", "state", "head", "note",
+                        "queued_at", "updated_at")}
+        v01.update(state="candidate", head=head, queued_at=1.0)
+        f.write_text(json.dumps(v01))
+        status = self.pl("status")
+        self.assertEqual(status.returncode, 0, status.stderr)
+        self.assertIn("old", status.stdout)
+        self.assertEqual(self.pl("show", "old").returncode, 0)
+        train = self.pl("train")
+        self.assertIn("landed 1 lane(s)", train.stdout, train.stdout + train.stderr)
+        self.assertEqual(self.state("old"), "landed")
+
+
 class ConflictTrainTest(RepoCase):
     def check_conflict_bounce(self, train_output: str) -> None:
         self.assertEqual((self.state("a"), self.state("b")), ("landed", "bounced"), train_output)

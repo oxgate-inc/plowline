@@ -190,12 +190,44 @@ class NoticeAndRepairTest(RepoCase):
         self.assertEqual((lane, Path(path), notice, saw), ("a", self.wt("a"), "a.md", "True"))
         self.assertEqual(self.state("a"), "active")
         self.assertIn("repairs 1/1", self.pl("status").stdout)
-        # The repair did not fix it: the next bounce stops and asks for a person.
-        self.assertEqual(self.pl("done", "a").returncode, 0)
+        # The repair did not fix it (its own pl done runs with PLOWLINE_REPAIR): the next bounce asks for a person.
+        self.assertEqual(self.run_with_env({**ENV, "PLOWLINE_REPAIR": "1"}, "done", "a").returncode, 0)
         train = self.pl("train")
         self.assertIn("split this lane or re-plan", train.stdout)
         self.assertEqual(self.state("a"), "bounced")
         self.assertEqual(len(agent_log.read_text().strip().splitlines()), 1)
+
+    def test_repairs_reset_on_landing_and_on_a_manual_done(self):
+        from plowline.demo import ENV
+        agent_log = self.tmp / "agent.log"
+        ENV["AGENT_LOG"] = str(agent_log)
+        self.addCleanup(ENV.pop, "AGENT_LOG", None)
+        (self.tmp / "agent.py").write_text(FAKE_AGENT)
+        agent = (self.tmp / "agent.py").as_posix()
+        self.configure(f"repair = '\"{PY}\" \"{agent}\" {{lane}} {{path}} {{notice}}'\nrepair_attempts = 1\n")
+        self.lane("a", {"a.txt": "BROKEN\n"})
+        self.pl("train")
+        self.wait_for(agent_log)
+        self.assertEqual(self.lane_json("a")["repairs"], 1)
+        # A repair agent's own `pl done` keeps the count, so the cap holds.
+        repair_env = {**ENV, "PLOWLINE_REPAIR": "1"}
+        self.assertEqual(self.run_with_env(repair_env, "done", "a").returncode, 0)
+        self.assertEqual(self.lane_json("a")["repairs"], 1)
+        self.pl("train")  # bounces again: the cap is spent
+        self.assertEqual(self.lane_json("a")["repairs"], 1)
+        # A person fixes it and runs pl done: the count starts over.
+        self.pl("resume", "a")
+        self.commit("a", {"a.txt": "fixed\n"})
+        done = self.pl("done", "a")
+        self.assertIn("repair count reset", done.stdout)
+        self.assertEqual(self.lane_json("a")["repairs"], 0)
+        self.pl("train")
+        self.assertEqual((self.state("a"), self.lane_json("a")["repairs"]), ("landed", 0))
+
+    def run_with_env(self, env, *args):
+        import subprocess
+        return subprocess.run([sys.executable, "-m", "plowline", *args], cwd=self.app, env=env,
+                              capture_output=True, text=True)
 
     def test_without_repair_bounces_stay_manual(self):
         self.configure("agent = \"claude {lane}\"\n")

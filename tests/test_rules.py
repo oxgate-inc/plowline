@@ -19,6 +19,15 @@ class VerdictTest(unittest.TestCase):
         for dash in "‐‑‒–—―−－":
             self.assertEqual(rules.verdict_token(f"NO{dash}GO"), "NO-GO", repr(dash))
 
+    def test_no_go_written_without_a_hyphen_is_still_no_go(self):
+        for text in ("NO GO", "No go: broken", "Verdict: not GO", "NOGO", "no  go", "Verdict: NOT go\nGO later",
+                     "NO—GO", "**No Go**"):
+            self.assertEqual(rules.verdict_token(text), "NO-GO", repr(text))
+
+    def test_go_is_still_go(self):
+        for text in ("GO", "Verdict: GO", "go\nall good", "# Review: GO\n\n## Blocking\nnone"):
+            self.assertEqual(rules.verdict_token(text), "GO", repr(text))
+
     def test_go_needs_word_boundaries(self):
         self.assertEqual(rules.verdict_token("GOOD work\nGOTCHA"), "")
         self.assertEqual(rules.verdict_token("ALGO"), "")

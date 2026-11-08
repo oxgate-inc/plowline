@@ -6,7 +6,9 @@
 
 - **Bisection on a red gate.** A red train is split until the merged set is
   green. Each lane that turns a green set red is bounced with the gate output;
-  the rest land in the same train. With two lanes the first probe is still "drop
+  the rest land in the same train. Of two lanes red only together, the later one
+  is blamed. A lane that stops merging once red lanes are dropped bounces as a
+  merge conflict. With two lanes the first probe is still "drop
   the last one". A red trunk (`GATE_RED_ON_TRUNK`) blames no lane.
 - **Conflict preview.** With git 2.38+, `git merge-tree --write-tree --name-only`
   finds a conflicting lane without touching the scratch tree; older git falls
@@ -18,8 +20,9 @@
   commit it was reviewed on. A lane whose branch moved after its GO goes back to
   `active` (`STALE_REVIEW`) instead of riding an old verdict. A moved trunk is
   reported, and the train gates the merged result as it always did.
-- **Verdict parsing.** NO-GO is read before GO in the reviewer's first eight
-  lines, after folding Unicode dashes (U+2010..U+2015, U+2212, U+FF0D) to `-`. A
+- **Verdict parsing.** A refusal is read before GO in the reviewer's first eight
+  lines, after folding Unicode dashes (U+2010..U+2015, U+2212, U+FF0D) to `-`:
+  `NO-GO`, `NO GO`, `No go`, `NOGO` and `not GO` are all NO-GO. A
   command reviewer that exits 0 but says NO-GO is a NO-GO. A built-in reviewer
   that names neither is a NO-GO.
 - **Gate lists.** `gate` takes a list of commands, run in order, stopping at the
@@ -54,7 +57,8 @@
   (reason, paths or gate output, what to do); `pl resume` prints it. With
   `repair = "<command>"` (placeholders `{lane}`, `{path}`, `{notice}`), a train
   bounce starts that command in the lane with the notice on stdin, up to
-  `repair_attempts` (default 2), then prints "split this lane or re-plan".
+  `repair_attempts` (default 2), then prints "split this lane or re-plan". The
+  count starts over when the lane lands or a person runs `pl done`.
   `agent` keeps meaning what `pl open` starts.
 - **Brief scaffold.** `pl new <lane> --brief` writes `briefs/<lane>.md` with Goal,
   Files you may touch, Do not touch, Acceptance and Report. Briefs are read live.

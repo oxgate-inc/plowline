@@ -11,6 +11,8 @@ T = TypeVar("T")
 # as GO, so every Unicode dash is folded to "-" before the verdict is parsed.
 DASHES = dict.fromkeys(map(ord, "‐‑‒–—―−﹘﹣－"), "-")
 GO_WORD = re.compile(r"(?<![-\w])GO(?![-\w])")
+# "NO-GO", "NO GO", "No go", "NOGO" and "not GO" are all refusals. Read on the upper-cased, dash-folded text.
+NO_GO = re.compile(r"\bNO[\s-]*GO\b|\bNOT\s+GO\b")
 VERDICT_LINES = 8
 
 
@@ -21,7 +23,7 @@ def fold_dashes(text: str) -> str:
 def verdict_token(text: str) -> str:
     """GO, NO-GO or "" from the first eight lines of a review. NO-GO is read first, so it always wins."""
     head = fold_dashes("\n".join(text.splitlines()[:VERDICT_LINES])).upper()
-    if "NO-GO" in head:
+    if NO_GO.search(head):
         return "NO-GO"
     return "GO" if GO_WORD.search(head) else ""
 
