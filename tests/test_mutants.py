@@ -419,11 +419,30 @@ class CoverageTest(unittest.TestCase):
         self.assertEqual(mutants.code_lines("A.cs", cs, [(1, 2)]), [2])
         self.assertEqual(mutants.code_lines("a.ts", "", [(3, 4)]), [3, 4])  # source unknown: assume code
 
+    def test_a_star_is_a_comment_only_inside_a_block(self):
+        rs = "fn f(c: &mut u32) {\n    *c += 1;\n    /* x */ foo();\n    /* a\n     * b\n     */\n}\n"
+        self.assertEqual(mutants.code_lines("src/a.rs", rs, [(2, 6)]), [2, 3])  # deref and code after `*/`
+        self.assertEqual(mutants.code_lines("a.go", "func f(p *int) {\n\t*p = 1\n}\n", [(2, 2)]), [2])
+        self.assertEqual(mutants.code_lines("a.ts", 'const s = "/* not */";\nlet x = 1;\n', [(2, 2)]), [2])
+        self.assertEqual(mutants.code_lines("a.ts", "/*\nlet x = 1;\n*/\n", [(2, 2)]), [])  # inside a block
+
+    def test_a_python_file_that_does_not_parse_counts_its_lines(self):
+        self.assertEqual(mutants.code_lines("a.py", "def f(:\n    # why\n    return 1\nX = 2\n", [(1, 4)]),
+                         [1, 3, 4])
+        out = mutants.check_coverage(self.outcome({}), [mutants.FileScope("a.py", [(1, 1)])], {"a.py": "def f(:\n"})
+        self.assertEqual(out.unavailable, "its report has nothing for a.py")
+
+    def test_a_docstring_is_not_code(self):
+        py = 'def f(a):\n    """How it works,\n    in two lines."""\n    return a\n'
+        self.assertEqual(mutants.code_lines("a.py", py, [(2, 4)]), [4])
+        out = mutants.check_coverage(self.outcome({"a.py": 0}), [mutants.FileScope("a.py", [(2, 3)])], {"a.py": py})
+        self.assertEqual(out.unavailable, "")
+
     def test_a_comment_only_edit_passes_even_when_the_report_omits_the_file(self):
         files = [mutants.FileScope("src/lib.rs", [(2, 2)])]
         out = mutants.check_coverage(self.outcome({}), files, {"src/lib.rs": "fn f() {}\n// tidy\n"})
         self.assertEqual(out.unavailable, "")
-        self.assertIn("only comments, blank lines or imports changed in src/lib.rs", out.note)
+        self.assertIn("only comments, docstrings, blank lines or imports changed in src/lib.rs", out.note)
 
     def test_changed_code_with_no_judged_mutant_is_unavailable(self):
         files = [mutants.FileScope("a.ts", [(2, 2)])]

@@ -226,8 +226,10 @@ function's body" mutant covers the body), its line where the engine gives only
 a line. A changed file whose changed lines hold code, but on which the engine
 judged no mutant, is UNAVAILABLE, never a pass: the report left the file out
 (a path or module name did not match), or the engine skipped, ignored or could
-not compile every mutant there. An edit only to comments, blank lines, imports
-or brackets has nothing to mutate; it passes, named in the report.
+not compile every mutant there. An edit only to comments (`//`, `/* ... */`
+blocks, `#`), Python docstrings, blank lines, imports or brackets has nothing
+to mutate; it passes, named in the report. A Python file that does not parse
+has every non-comment line counted as code.
 
 For any other language, or to replace a built-in engine, name a command for the
 extension:

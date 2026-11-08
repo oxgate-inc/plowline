@@ -359,8 +359,6 @@ class Outcome:
         return cls(engine, parsed.survivors, parsed.killed, evaluated=parsed.evaluated)
 
 
-C_COMMENTS = ("//", "/*", "*", "*/")
-COMMENT_PREFIXES = {".py": ("#",)}
 IMPORT_LINES = {
     ".py": re.compile(r"^(import\s|from\s+\S+\s+import\b)"),
     ".rs": re.compile(r"^(pub(\([^)]*\))?\s+)?use\s"),
@@ -371,23 +369,72 @@ JS_IMPORT = re.compile(r"^(import\s|export\s+(\*|\{[^}]*\}|type\s+\{[^}]*\})\s*f
 PUNCTUATION_ONLY = re.compile(r"^[{}()\[\];,]*$")
 
 
+def without_c_comments(lines: list[str]) -> list[str]:
+    """Each line of a C-family file with its `//` and `/* ... */` comments removed, following a block comment
+    across lines. A `*` is a comment only inside an open block, so `*p = v;` stays code. Double-quoted and
+    backtick strings are skipped, so a `/*` inside one opens nothing."""
+    out, in_block = [], False
+    for line in lines:
+        kept, i = [], 0
+        while i < len(line):
+            if in_block:
+                end = line.find("*/", i)
+                in_block, i = (True, len(line)) if end < 0 else (False, end + 2)
+            elif line[i] in "\"`":
+                j = i + 1
+                while j < len(line) and line[j] != line[i]:
+                    j += 2 if line[j] == "\\" else 1
+                kept.append(line[i:j + 1])
+                i = j + 1
+            elif line.startswith("//", i):
+                break
+            elif line.startswith("/*", i):
+                in_block, i = True, i + 2
+            else:
+                kept.append(line[i])
+                i += 1
+        out.append("".join(kept))
+    return out
+
+
+def docstring_lines(source: str) -> set[int]:
+    """The lines of every docstring (a string that is the first statement of a module, class or function)."""
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        return set()
+    out: set[int] = set()
+    for node in ast.walk(tree):
+        first = getattr(node, "body", None)
+        first = first[0] if isinstance(first, list) and first else None
+        if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant) and isinstance(first.value.value, str):
+            out.update(range(first.lineno, (first.end_lineno or first.lineno) + 1))
+    return out
+
+
 def code_lines(path: str, source: str, ranges: list[tuple[int, int]]) -> list[int]:
-    """The changed lines that hold code an engine could mutate: not blank, not a comment, not only an import or
-    brackets. For Python only lines inside a function count (mutmut mutates function bodies only). A line the
-    source does not have counts as code, to stay on the safe side."""
+    """The changed lines that hold code an engine could mutate: not blank, not a comment or a docstring, not only an
+    import or brackets. For Python only lines inside a function count (mutmut mutates function bodies only); a
+    Python file that does not parse has every such line counted. A line the source does not have counts as code,
+    to stay on the safe side."""
     ext = Path(path).suffix.lower()
     lines = lines_of(source)
-    comments = COMMENT_PREFIXES.get(ext, C_COMMENTS)
     imports = IMPORT_LINES.get(ext, JS_IMPORT)
-    spans = [(s, e) for _, _, s, e in python_functions(source) or []] if ext == ".py" else None
+    if ext == ".py":
+        functions = python_functions(source)
+        spans = None if functions is None else [(s, e) for _, _, s, e in functions]
+        skip = docstring_lines(source)
+        texts = ["" if line.strip().startswith("#") else line for line in lines]
+    else:
+        spans, skip, texts = None, set(), without_c_comments(lines)
     out = []
     for a, b in ranges:
         for n in range(a, b + 1):
             if n > len(lines):
                 out.append(n)
                 continue
-            text = lines[n - 1].strip()
-            if not text or PUNCTUATION_ONLY.match(text) or text.startswith(comments) or imports.match(text):
+            text = texts[n - 1].strip()
+            if not text or n in skip or PUNCTUATION_ONLY.match(text) or imports.match(text):
                 continue
             if spans is not None and not any(s <= n <= e for s, e in spans):
                 continue
@@ -418,8 +465,8 @@ def check_coverage(outcome: Outcome, files: list[FileScope], sources: dict[str, 
     if problems:
         return Outcome(outcome.engine, unavailable="; ".join(problems), note=outcome.note)
     if quiet:
-        outcome.note = "\n".join(filter(None, [outcome.note, f"{outcome.engine}: only comments, blank lines or "
-                                                             f"imports changed in {', '.join(quiet)}"]))
+        what = f"{outcome.engine}: only comments, docstrings, blank lines or imports changed in {', '.join(quiet)}"
+        outcome.note = "\n".join(filter(None, [outcome.note, what]))
     return outcome
 
 
